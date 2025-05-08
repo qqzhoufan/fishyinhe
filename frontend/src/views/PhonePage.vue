@@ -20,7 +20,7 @@ const fileList = ref([]);
 const isFileListing = ref(false);
 const fileListError = ref('');
 
-// --- 文件上传相关状态 ---
+// --- 文件上传相关状态 (普通文件上传) ---
 const fileInputRef = ref(null);
 const selectedFileToUpload = ref(null);
 const isUploadingFile = ref(false);
@@ -28,8 +28,9 @@ const uploadProgress = ref(0);
 const uploadError = ref('');
 const uploadSuccessMessage = ref('');
 
-// --- APK 安装相关状态 (重新添加) ---
-const lastUploadedApkInfo = ref(null); // { remotePath: string, filename: string }
+// --- APK 安装相关状态 ---
+const apkFileInputRef = ref(null);
+const selectedApkToInstall = ref(null);
 const isInstallingApk = ref(false);
 const apkInstallMessage = ref('');
 const apkInstallError = ref('');
@@ -50,7 +51,7 @@ async function fetchDevices() {
   fileListError.value = '';
   uploadError.value = '';
   uploadSuccessMessage.value = '';
-  lastUploadedApkInfo.value = null; // 重置APK信息
+  selectedApkToInstall.value = null;
   apkInstallMessage.value = '';
   apkInstallError.value = '';
 
@@ -82,7 +83,7 @@ function selectDevice(deviceId) {
   fileListError.value = '';
   uploadError.value = '';
   uploadSuccessMessage.value = '';
-  lastUploadedApkInfo.value = null;
+  selectedApkToInstall.value = null;
   apkInstallMessage.value = '';
   apkInstallError.value = '';
 
@@ -100,7 +101,7 @@ function startScreenMirroring() {
   socket = new WebSocket(wsUrl);
   socket.binaryType = 'blob';
   isMirroring.value = true;
-  errorMessage.value = '';
+  errorMessage.value = ''; // 清空主错误，让镜像特定错误显示
 
   socket.onopen = () => {
     if (screenCanvasRef.value) canvasCtx = screenCanvasRef.value.getContext('2d');
@@ -145,7 +146,7 @@ async function fetchFileList() {
   apkInstallError.value = '';
 
   try {
-    const response = await axios.get(`http://localhost:5679/api/devices/${selectedDeviceId.value}/files`, {
+    const response = await axios.get(`http://localhost:5679/api/files/list/${selectedDeviceId.value}`, { // 修正API路径
       params: { path: currentRemotePath.value }
     });
     currentRemotePath.value = response.data.path || currentRemotePath.value;
@@ -181,7 +182,8 @@ async function downloadFile(item) {
   fullRemotePath += item.name;
 
   fileListError.value = `正在准备下载 ${item.name}...`;
-  const downloadUrl = `http://localhost:5679/api/devices/${selectedDeviceId.value}/files/download?filePath=${encodeURIComponent(fullRemotePath)}`;
+  // 修正API路径
+  const downloadUrl = `http://localhost:5679/api/files/download/${selectedDeviceId.value}?filePath=${encodeURIComponent(fullRemotePath)}`;
 
   try {
     const response = await axios({ url: downloadUrl, method: 'GET', responseType: 'blob' });
@@ -235,16 +237,12 @@ function triggerFileInput() {
   selectedFileToUpload.value = null;
   uploadError.value = '';
   uploadSuccessMessage.value = '';
-  apkInstallMessage.value = ''; // 清除旧的安装信息
-  apkInstallError.value = '';
-  lastUploadedApkInfo.value = null; // 清除旧的APK信息
   uploadProgress.value = 0;
   if (fileInputRef.value) {
     fileInputRef.value.value = '';
     fileInputRef.value.click();
   }
 }
-
 function handleFileSelect(event) {
   const file = event.target.files[0];
   if (file) {
@@ -255,29 +253,23 @@ function handleFileSelect(event) {
     selectedFileToUpload.value = null;
   }
 }
-
 async function uploadSelectedFile() {
   if (!selectedFileToUpload.value) { uploadError.value = "请先选择文件。"; return; }
   if (!selectedDeviceId.value) { uploadError.value = "请先选择设备。"; return; }
   if (!currentRemotePath.value || !currentRemotePath.value.endsWith('/')) {
     uploadError.value = "当前远程路径无效。"; return;
   }
-
   isUploadingFile.value = true;
   uploadProgress.value = 0;
   uploadError.value = '';
   uploadSuccessMessage.value = '';
-  apkInstallMessage.value = ''; // 清除旧的安装信息
-  apkInstallError.value = '';
-  lastUploadedApkInfo.value = null; // 清除旧的APK信息
-
   const formData = new FormData();
   formData.append('file', selectedFileToUpload.value);
   formData.append('remoteDirPath', currentRemotePath.value);
-
   try {
     const response = await axios.post(
-        `http://localhost:5679/api/devices/${selectedDeviceId.value}/files/upload`,
+        // 修正API路径
+        `http://localhost:5679/api/files/upload/${selectedDeviceId.value}`,
         formData,
         {
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -285,64 +277,67 @@ async function uploadSelectedFile() {
         }
     );
     uploadSuccessMessage.value = `文件 "${response.data.filename}" 成功上传到 "${response.data.filePath}"。`;
-    console.log('[uploadSelectedFile] Upload successful. Backend response:', response.data);
-
-    // 重新添加：检查是否是APK文件，若是则保存信息
-    if (response.data.filename && response.data.filename.toLowerCase().endsWith('.apk')) {
-      lastUploadedApkInfo.value = {
-        remotePath: response.data.filePath, // APK 在设备上的完整路径
-        filename: response.data.filename,
-      };
-      console.log('[uploadSelectedFile] APK detected and info stored:', JSON.parse(JSON.stringify(lastUploadedApkInfo.value)));
-    } else {
-      lastUploadedApkInfo.value = null; // 如果不是APK，确保清除
-      console.log('[uploadSelectedFile] Uploaded file is not an APK. Filename:', response.data.filename);
-    }
-
     selectedFileToUpload.value = null;
     if (fileInputRef.value) fileInputRef.value.value = '';
     fetchFileList();
   } catch (error) {
-    console.error("Upload error:", error);
     uploadError.value = `上传失败: ${error.response?.data?.error || error.message}`;
   } finally {
     isUploadingFile.value = false;
   }
 }
 
-// --- APK 安装方法 (重新添加) ---
-async function installUploadedApk() {
-  if (!lastUploadedApkInfo.value || !lastUploadedApkInfo.value.remotePath) {
-    apkInstallError.value = "没有找到已上传的 APK 文件信息。";
-    return;
+// --- APK 安装方法 ---
+function triggerApkFileInput() {
+  selectedApkToInstall.value = null;
+  apkInstallError.value = '';
+  apkInstallMessage.value = '';
+  if (apkFileInputRef.value) {
+    apkFileInputRef.value.value = '';
+    apkFileInputRef.value.click();
   }
-  if (!selectedDeviceId.value) {
-    apkInstallError.value = "请先选择一个设备。";
-    return;
+}
+function handleApkFileSelect(event) {
+  const file = event.target.files[0];
+  if (file && file.name.toLowerCase().endsWith('.apk')) {
+    selectedApkToInstall.value = file;
+    apkInstallError.value = '';
+    apkInstallMessage.value = '';
+  } else if (file) {
+    selectedApkToInstall.value = null;
+    apkInstallError.value = "请选择一个有效的 .apk 文件。";
+  } else {
+    selectedApkToInstall.value = null;
   }
-
-  console.log('[installUploadedApk] APK path being sent to backend for installation:', lastUploadedApkInfo.value.remotePath);
+}
+async function installSelectedApk() {
+  if (!selectedApkToInstall.value) { apkInstallError.value = "请先选择一个 APK 文件。"; return; }
+  if (!selectedDeviceId.value) { apkInstallError.value = "请先选择一个目标设备。"; return; }
 
   isInstallingApk.value = true;
-  apkInstallMessage.value = `正在尝试安装 ${lastUploadedApkInfo.value.filename}...`;
+  apkInstallMessage.value = `正在安装 ${selectedApkToInstall.value.name}...`;
   apkInstallError.value = '';
-  uploadSuccessMessage.value = ''; // 清除上传成功消息
-  uploadError.value = '';       // 清除上传错误消息
+  uploadSuccessMessage.value = '';
+  uploadError.value = '';
+
+  const formData = new FormData();
+  formData.append('apkFile', selectedApkToInstall.value);
 
   try {
     const response = await axios.post(
-        `http://localhost:5679/api/devices/${selectedDeviceId.value}/apk/install`,
-        { apkPath: lastUploadedApkInfo.value.remotePath } // 发送JSON请求体
+        // 修正API路径
+        `http://localhost:5679/api/apk/install/${selectedDeviceId.value}`,
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } }
     );
-    console.log("APK Install response:", response.data);
-    // 使用 pre 标签来更好地显示可能的多行 ADB 输出
     apkInstallMessage.value = `APK 安装命令已执行。\nADB 输出:\n${response.data.details || '无详细输出。'}`;
-    // 简单的成功判断（可能需要根据实际ADB输出调整）
     if (response.data.details && response.data.details.toLowerCase().includes("success")) {
-      apkInstallMessage.value += "\n(看起来成功了!)";
+      apkInstallMessage.value += "\n(安装成功!)";
     } else {
       apkInstallError.value = "警告：安装输出中未明确包含 'Success'。请检查 ADB 输出详情。";
     }
+    selectedApkToInstall.value = null;
+    if (apkFileInputRef.value) apkFileInputRef.value.value = '';
 
   } catch (error) {
     console.error("APK Install error:", error);
@@ -353,12 +348,11 @@ async function installUploadedApk() {
     } else {
       apkInstallError.value = `APK 安装失败: ${error.message || '未知服务器或网络错误'}`;
     }
-    apkInstallMessage.value = ''; // 清除“正在安装”消息
+    apkInstallMessage.value = '';
   } finally {
     isInstallingApk.value = false;
   }
 }
-
 
 // --- 生命周期函数 和 watch ---
 onMounted(() => fetchDevices());
@@ -383,8 +377,7 @@ watch(selectedDeviceId, (newId, oldId) => {
     <p style="margin:2px 0;">Upload%: {{ uploadProgress }}</p>
     <p style="margin:2px 0; color: sienna;">UploadErr: {{ uploadError || 'N' }}</p>
     <p style="margin:2px 0; color: green;">UploadOK: {{ uploadSuccessMessage || 'N' }}</p>
-    <p style="margin:2px 0; font-weight: bold;">LastAPK Filename: {{ lastUploadedApkInfo?.filename || 'N' }}</p>
-    <p style="margin:2px 0; font-weight: bold;">LastAPK RemotePath: {{ lastUploadedApkInfo?.remotePath || 'N' }}</p>
+    <p style="margin:2px 0; font-weight: bold;">Selected APK: {{ selectedApkToInstall?.name || 'N' }}</p>
     <p style="margin:2px 0;">InstallingAPK: {{ isInstallingApk }}</p>
     <p style="margin:2px 0; color: green;">InstallOK: {{ apkInstallMessage || 'N' }}</p>
     <p style="margin:2px 0; color: sienna;">InstallErr: {{ apkInstallError || 'N' }}</p>
@@ -434,11 +427,10 @@ watch(selectedDeviceId, (newId, oldId) => {
           <p v-if="!canvasCtx && isMirroring">正在初始化画布...</p>
         </div>
       </section>
-
       <hr class="section-divider">
 
       <section class="action-section file-browser-section">
-        <h4>文件浏览器</h4>
+        <h4>文件浏览器 & 文件上传</h4>
         <div class="path-navigation">
           <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径" :disabled="isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" />
           <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" class="control-btn">
@@ -458,7 +450,7 @@ watch(selectedDeviceId, (newId, oldId) => {
               :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk"
           />
           <button @click="triggerFileInput" class="control-btn choose-file-btn" :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk">
-            选择文件
+            选择文件上传
           </button>
           <span v-if="selectedFileToUpload" class="selected-file-name">
             已选: {{ selectedFileToUpload.name }} ({{ (selectedFileToUpload.size / 1024).toFixed(2) }} KB)
@@ -483,23 +475,6 @@ watch(selectedDeviceId, (newId, oldId) => {
         <div v-if="uploadError" class="error-message upload-status-message">
           {{ uploadError }}
         </div>
-        <div v-if="lastUploadedApkInfo" class="apk-install-area">
-          <p class="apk-info">检测到已上传APK: <strong>{{ lastUploadedApkInfo.filename }}</strong></p>
-          <p class="apk-info-path">路径: {{ lastUploadedApkInfo.remotePath }}</p>
-          <button
-              @click="installUploadedApk"
-              class="control-btn install-apk-btn"
-              :disabled="isInstallingApk || isUploadingFile || !selectedDeviceId"
-          >
-            {{ isInstallingApk ? '正在安装...' : `安装 ${lastUploadedApkInfo.filename}` }}
-          </button>
-        </div>
-        <div v-if="apkInstallMessage" class="success-message install-status-message">
-          <pre>{{ apkInstallMessage }}</pre>
-        </div>
-        <div v-if="apkInstallError" class="error-message install-status-message">
-          <pre>{{ apkInstallError }}</pre>
-        </div>
         <div v-if="isFileListing" class="loading-section"><p>正在加载文件列表...</p></div>
         <div v-if="fileListError && !isFileListing" class="error-section"><p class="error-message">{{ fileListError }}</p></div>
 
@@ -519,6 +494,42 @@ watch(selectedDeviceId, (newId, oldId) => {
         </div>
         <div v-if="!isFileListing && !fileListError && fileList.length === 0 && currentRemotePath && selectedDeviceId && !errorMessage" class="no-files-section">
           <p>目录 “{{ currentRemotePath }}” 为空或无法访问。</p>
+        </div>
+      </section>
+
+      <hr class="section-divider">
+
+      <section class="action-section apk-installer-section">
+        <h4>APK 安装器</h4>
+        <div class="apk-install-area">
+          <input
+              type="file"
+              @change="handleApkFileSelect"
+              ref="apkFileInputRef"
+              style="display: none;"
+              accept=".apk"
+              :disabled="isInstallingApk || !selectedDeviceId"
+          />
+          <button @click="triggerApkFileInput" class="control-btn choose-file-btn" :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile">
+            选择本地 APK 文件
+          </button>
+          <span v-if="selectedApkToInstall" class="selected-file-name">
+                已选: {{ selectedApkToInstall.name }} ({{ (selectedApkToInstall.size / 1024 / 1024).toFixed(2) }} MB)
+             </span>
+          <button
+              v-if="selectedApkToInstall"
+              @click="installSelectedApk"
+              class="control-btn install-apk-btn"
+              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile"
+          >
+            {{ isInstallingApk ? '正在安装...' : '安装选中的 APK' }}
+          </button>
+        </div>
+        <div v-if="apkInstallMessage" class="success-message install-status-message">
+          <pre>{{ apkInstallMessage }}</pre>
+        </div>
+        <div v-if="apkInstallError" class="error-message install-status-message">
+          <pre>{{ apkInstallError }}</pre>
         </div>
       </section>
     </div>
@@ -544,26 +555,25 @@ watch(selectedDeviceId, (newId, oldId) => {
 .error-section p.error-message,
 .mirror-error p.error-message,
 .upload-status-message.error-message,
-.install-status-message.error-message { /* 统一错误消息样式 */
+.install-status-message.error-message {
   color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb;
   padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
 }
 .success-message.upload-status-message,
-.success-message.install-status-message { /* 统一成功消息样式 */
+.success-message.install-status-message {
   color: #155724; background-color: #d4edda; border: 1px solid #c3e6cb;
   padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
 }
-/* 为安装消息中的 pre 标签添加样式 */
 .install-status-message pre {
   white-space: pre-wrap;
   word-break: break-all;
   font-family: 'Courier New', Courier, monospace;
   font-size: 0.9em;
-  max-height: 150px; /* 限制最大高度 */
-  overflow-y: auto;  /* 超出则滚动 */
-  background-color: rgba(0,0,0,0.03); /* 轻微背景色区分 */
+  max-height: 150px;
+  overflow-y: auto;
+  background-color: rgba(0,0,0,0.03);
   padding: 8px;
-  margin-top: 5px; /* 与主消息的间距 */
+  margin-top: 5px;
   border-radius: 3px;
 }
 
@@ -617,34 +627,38 @@ watch(selectedDeviceId, (newId, oldId) => {
 .upload-progress-bar { width: 0%; height: 100%; background-color: #007bff; color: white; text-align: center; line-height: 22px; font-size: 0.85em; transition: width 0.3s ease-out; }
 
 /* APK 安装 (重新添加) */
+.apk-installer-section { /* 可以给APK安装部分一个独立的容器 */
+  margin-top: 20px; /* 和文件列表的间距 */
+}
 .apk-install-area {
-  margin-top: 18px;
-  padding: 15px;
-  background-color: #e7f3fe; /* 淡蓝色背景 */
-  border: 1px solid #b6d4fe;
+  margin-bottom: 15px; /* 与状态消息的间距 */
+  padding: 12px;
+  background-color: #fff9e6; /* 淡黄色背景 */
+  border: 1px dashed #ffecb3;
   border-radius: 5px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.apk-install-area .apk-info, .apk-install-area .apk-info-path {
-  font-size: 0.95em;
-  color: #004085; /* 深蓝色文字 */
-  margin: 5px 0;
-  word-break: break-all; /* 防止长路径破坏布局 */
+.apk-install-area .choose-file-btn { /* APK 选择按钮样式 */
+  background-color: #fd7e14; /* Orange */
+  color: white;
 }
-.apk-install-area .apk-info strong {
-  font-weight: 600;
+.apk-install-area .choose-file-btn:not(:disabled):hover {
+  background-color: #e67e22;
 }
-.apk-install-area .install-apk-btn {
-  background-color: #ffc107; /* 警告黄色按钮 */
-  color: #212529; /* 深色文字 */
-  margin-top: 10px;
+.apk-install-area .install-apk-btn { /* APK 安装按钮样式 */
+  background-color: #ffc107; /* Warning Yellow */
+  color: #212529;
 }
 .apk-install-area .install-apk-btn:not(:disabled):hover {
   background-color: #e0a800;
 }
-/* 安装状态消息样式已通过复用 .success-message 和 .error-message 处理 */
+/* 复用 .selected-file-name 样式 */
 
 /* 文件列表容器 */
-.file-browser-section .file-list-container ul { list-style-type: none; padding: 0; max-height: 380px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 5px; background-color: #ffffff; }
+.file-browser-section .file-list-container ul { list-style-type: none; padding: 0; max-height: 380px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 5px; background-color: #ffffff; margin-top: 15px; }
 .file-browser-section .file-item { display: flex; align-items: center; padding: 11px 14px; border-bottom: 1px solid #f1f3f5; cursor: pointer; transition: background-color 0.2s; }
 .file-browser-section .file-item:last-child { border-bottom: none; }
 .file-browser-section .file-item:hover { background-color: #e9f5ff; }
@@ -661,9 +675,14 @@ watch(selectedDeviceId, (newId, oldId) => {
 </style>
 ```
 
-**请注意：**
-* 这份代码假设您后端的 APK 安装接口 (`POST /api/devices/:deviceId/apk/install`) 和 `adb.InstallAPK` 函数已经按照我们之前讨论的、使用 `adb shell pm install` 的方式修改好了。
-* APK 安装的成功与否判断是基于后端返回的 `details` 字段中是否包含 "success" (不区分大小写)。这可能需要根据您实际测试中 ADB 的输出进行微调。
-* 仍然建议您先用一个简单的、不含空格的文件名（如 `test.apk`）上传到 `/data/local/tmp/` 目录，然后尝试安装，以排除文件名和路径权限的干扰。
+**重要的检查点：**
 
-请使用这个完整的代码替换您现有的 `PhonePage.vue`，然后重启前端开发服务器进行
+1.  **后端代码：** 确保您的 Go 后端代码包含了 `internal/adb/adb.go` 中修改后的 `InstallAPK` 函数（接收服务器本地路径），以及 `internal/api/handler/apk_handler.go` 中的 `InstallLocalAPKHandler`，并且 `internal/api/router.go` 中定义了指向它的 `POST /api/apk/install/:deviceId` 路由。
+2.  **重启服务：** 在替换前端代码后，务必重启后端服务 (`myadb.exe`) 和前端开发服务器 (`npm run dev`)。
+3.  **测试流程：**
+* 选择设备。
+* 点击“选择本地 APK 文件”按钮，选择一个 `.apk` 文件。
+* 点击“安装选中的 APK”按钮。
+* 观察界面上的状态消息和浏览器控制台的日志。
+
+希望这次能顺利

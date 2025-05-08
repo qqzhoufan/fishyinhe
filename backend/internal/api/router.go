@@ -1,3 +1,4 @@
+// D:\fishyinhe\backend\internal\api\router.go
 package api
 
 import (
@@ -6,33 +7,35 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func SetupRouter() *gin.Engine {
-	router := gin.Default()
+// SetupRouter 创建、配置并返回 Gin 引擎实例 (用于分离部署)
+func SetupRouter() *gin.Engine { // 函数签名：无参数，返回 *gin.Engine
+	router := gin.Default() // 在这里创建 Gin 引擎
 
-	// 应用CORS中间件
+	// 应用 CORS 中间件 (可以全局应用，也可以只对 API 组应用)
 	router.Use(middleware.CORSMiddleware())
 
 	// API V1 路由组
 	apiV1 := router.Group("/api")
+	// 如果上面全局应用了 CORS，这里就不需要再 Use 了
+	// apiV1.Use(middleware.CORSMiddleware())
 	{
 		apiV1.GET("/health", handler.HealthCheck)
 		apiV1.GET("/devices", handler.GetDevices)
 		apiV1.GET("/screen/:deviceId", handler.ScreenMirrorWS)
 
-		// 文件相关路由
-		deviceFiles := apiV1.Group("/devices/:deviceId/files") // 使用路由组来组织
+		// 文件相关路由组 (保持之前的结构)
+		deviceFiles := apiV1.Group("/files")
 		{
-			deviceFiles.GET("", handler.ListFilesHandler)             // <--- 新增这行，路径为 /api/devices/:deviceId/files
-			deviceFiles.GET("/download", handler.DownloadFileHandler) // <--- 新增这行，路径为 /api/devices/:deviceId/files/download
-			deviceFiles.POST("/upload", handler.UploadFileHandler)    // <--- 新增这行，用于文件上传
-			// 未来可以添加 POST (上传), GET (下载特定文件), DELETE 等
+			deviceFiles.GET("/list/:deviceId", handler.ListFilesHandler)
+			deviceFiles.GET("/download/:deviceId", handler.DownloadFileHandler)
+			deviceFiles.POST("/upload/:deviceId", handler.UploadFileHandler)
 		}
 
-		apkRoutes := apiV1.Group("/devices/:deviceId/apk")
+		// APK 相关路由组 (保持之前的结构)
+		apkRoutes := apiV1.Group("/apk")
 		{
-			apkRoutes.POST("/install", handler.InstallAPKHandler) // <--- 新增这行
+			apkRoutes.POST("/install/:deviceId", handler.InstallLocalAPKHandler)
 		}
 	}
-
-	return router
+	return router // 返回创建并配置好的引擎
 }
