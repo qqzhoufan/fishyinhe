@@ -28,6 +28,13 @@ const uploadProgress = ref(0);
 const uploadError = ref('');
 const uploadSuccessMessage = ref('');
 
+// --- APK 安装相关状态 (重新添加) ---
+const lastUploadedApkInfo = ref(null); // { remotePath: string, filename: string }
+const isInstallingApk = ref(false);
+const apkInstallMessage = ref('');
+const apkInstallError = ref('');
+
+
 // --- 获取设备列表 ---
 async function fetchDevices() {
   console.log('[fetchDevices] Fetching device list...');
@@ -37,11 +44,16 @@ async function fetchDevices() {
   if (isMirroring.value) stopScreenMirroring();
   selectedDeviceId.value = null;
 
+  // 清空所有子功能状态
   fileList.value = [];
   currentRemotePath.value = '/sdcard/';
   fileListError.value = '';
   uploadError.value = '';
   uploadSuccessMessage.value = '';
+  lastUploadedApkInfo.value = null; // 重置APK信息
+  apkInstallMessage.value = '';
+  apkInstallError.value = '';
+
 
   try {
     const response = await axios.get('http://localhost:5679/api/devices');
@@ -64,11 +76,15 @@ function selectDevice(deviceId) {
 
   selectedDeviceId.value = deviceId;
 
+  // 重置文件和APK状态
   fileList.value = [];
   currentRemotePath.value = '/sdcard/';
   fileListError.value = '';
   uploadError.value = '';
   uploadSuccessMessage.value = '';
+  lastUploadedApkInfo.value = null;
+  apkInstallMessage.value = '';
+  apkInstallError.value = '';
 
   if (deviceId) {
     fetchFileList();
@@ -125,6 +141,8 @@ async function fetchFileList() {
   fileListError.value = '';
   uploadSuccessMessage.value = '';
   uploadError.value = '';
+  apkInstallMessage.value = ''; // 清空旧的安装消息
+  apkInstallError.value = '';
 
   try {
     const response = await axios.get(`http://localhost:5679/api/devices/${selectedDeviceId.value}/files`, {
@@ -217,6 +235,9 @@ function triggerFileInput() {
   selectedFileToUpload.value = null;
   uploadError.value = '';
   uploadSuccessMessage.value = '';
+  apkInstallMessage.value = ''; // 清除旧的安装信息
+  apkInstallError.value = '';
+  lastUploadedApkInfo.value = null; // 清除旧的APK信息
   uploadProgress.value = 0;
   if (fileInputRef.value) {
     fileInputRef.value.value = '';
@@ -236,23 +257,19 @@ function handleFileSelect(event) {
 }
 
 async function uploadSelectedFile() {
-  if (!selectedFileToUpload.value) {
-    uploadError.value = "请先选择文件。";
-    return;
-  }
-  if (!selectedDeviceId.value) {
-    uploadError.value = "请先选择设备。";
-    return;
-  }
+  if (!selectedFileToUpload.value) { uploadError.value = "请先选择文件。"; return; }
+  if (!selectedDeviceId.value) { uploadError.value = "请先选择设备。"; return; }
   if (!currentRemotePath.value || !currentRemotePath.value.endsWith('/')) {
-    uploadError.value = "当前远程路径无效。";
-    return;
+    uploadError.value = "当前远程路径无效。"; return;
   }
 
   isUploadingFile.value = true;
   uploadProgress.value = 0;
   uploadError.value = '';
   uploadSuccessMessage.value = '';
+  apkInstallMessage.value = ''; // 清除旧的安装信息
+  apkInstallError.value = '';
+  lastUploadedApkInfo.value = null; // 清除旧的APK信息
 
   const formData = new FormData();
   formData.append('file', selectedFileToUpload.value);
@@ -263,14 +280,25 @@ async function uploadSelectedFile() {
         `http://localhost:5679/api/devices/${selectedDeviceId.value}/files/upload`,
         formData,
         {
-          headers: {'Content-Type': 'multipart/form-data'},
-          onUploadProgress: (e) => {
-            if (e.total) uploadProgress.value = Math.round((e.loaded * 100) / e.total);
-          },
+          headers: { 'Content-Type': 'multipart/form-data' },
+          onUploadProgress: (e) => { if (e.total) uploadProgress.value = Math.round((e.loaded * 100) / e.total); },
         }
     );
     uploadSuccessMessage.value = `文件 "${response.data.filename}" 成功上传到 "${response.data.filePath}"。`;
-    // 移除了设置 lastUploadedApkInfo 的逻辑
+    console.log('[uploadSelectedFile] Upload successful. Backend response:', response.data);
+
+    // 重新添加：检查是否是APK文件，若是则保存信息
+    if (response.data.filename && response.data.filename.toLowerCase().endsWith('.apk')) {
+      lastUploadedApkInfo.value = {
+        remotePath: response.data.filePath, // APK 在设备上的完整路径
+        filename: response.data.filename,
+      };
+      console.log('[uploadSelectedFile] APK detected and info stored:', JSON.parse(JSON.stringify(lastUploadedApkInfo.value)));
+    } else {
+      lastUploadedApkInfo.value = null; // 如果不是APK，确保清除
+      console.log('[uploadSelectedFile] Uploaded file is not an APK. Filename:', response.data.filename);
+    }
+
     selectedFileToUpload.value = null;
     if (fileInputRef.value) fileInputRef.value.value = '';
     fetchFileList();
@@ -282,24 +310,69 @@ async function uploadSelectedFile() {
   }
 }
 
+// --- APK 安装方法 (重新添加) ---
+async function installUploadedApk() {
+  if (!lastUploadedApkInfo.value || !lastUploadedApkInfo.value.remotePath) {
+    apkInstallError.value = "没有找到已上传的 APK 文件信息。";
+    return;
+  }
+  if (!selectedDeviceId.value) {
+    apkInstallError.value = "请先选择一个设备。";
+    return;
+  }
+
+  console.log('[installUploadedApk] APK path being sent to backend for installation:', lastUploadedApkInfo.value.remotePath);
+
+  isInstallingApk.value = true;
+  apkInstallMessage.value = `正在尝试安装 ${lastUploadedApkInfo.value.filename}...`;
+  apkInstallError.value = '';
+  uploadSuccessMessage.value = ''; // 清除上传成功消息
+  uploadError.value = '';       // 清除上传错误消息
+
+  try {
+    const response = await axios.post(
+        `http://localhost:5679/api/devices/${selectedDeviceId.value}/apk/install`,
+        { apkPath: lastUploadedApkInfo.value.remotePath } // 发送JSON请求体
+    );
+    console.log("APK Install response:", response.data);
+    // 使用 pre 标签来更好地显示可能的多行 ADB 输出
+    apkInstallMessage.value = `APK 安装命令已执行。\nADB 输出:\n${response.data.details || '无详细输出。'}`;
+    // 简单的成功判断（可能需要根据实际ADB输出调整）
+    if (response.data.details && response.data.details.toLowerCase().includes("success")) {
+      apkInstallMessage.value += "\n(看起来成功了!)";
+    } else {
+      apkInstallError.value = "警告：安装输出中未明确包含 'Success'。请检查 ADB 输出详情。";
+    }
+
+  } catch (error) {
+    console.error("APK Install error:", error);
+    let errorDetails = '';
+    if (error.response && error.response.data) {
+      errorDetails = `\n详情: ${error.response.data.details || ''}`;
+      apkInstallError.value = `APK 安装失败: ${error.response.data.error || '未知错误'}${errorDetails}`;
+    } else {
+      apkInstallError.value = `APK 安装失败: ${error.message || '未知服务器或网络错误'}`;
+    }
+    apkInstallMessage.value = ''; // 清除“正在安装”消息
+  } finally {
+    isInstallingApk.value = false;
+  }
+}
+
+
 // --- 生命周期函数 和 watch ---
 onMounted(() => fetchDevices());
-onUnmounted(() => {
-  if (socket) stopScreenMirroring();
-});
+onUnmounted(() => { if (socket) stopScreenMirroring(); });
 watch(selectedDeviceId, (newId, oldId) => {
   if (isMirroring.value && newId !== oldId && oldId !== null) {
     stopScreenMirroring();
   }
 });
-
 </script>
 
 <template>
-  <div
-      style="position: fixed; top: 10px; right: 10px; background: rgba(238, 238, 238, 0.95); padding: 8px; border: 1px solid #ccc; z-index: 10000; font-size: 10px; max-width: 280px; word-break: break-all; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
-    <p style="margin:2px 0; font-weight: bold; border-bottom: 1px solid #ddd; padding-bottom: 3px; margin-bottom: 3px;">
-      调试信息:</p>
+  <div style="position: fixed; top: 10px; right: 10px; background: rgba(238, 238, 238, 0.95); padding: 8px; border: 1px solid #ccc; z-index: 10000; font-size: 10px; max-width: 280px; word-break: break-all; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+    <p style="margin:2px 0; font-weight: bold; border-bottom: 1px solid #ddd; padding-bottom: 3px; margin-bottom: 3px;">调试信息:</p>
     <p style="margin:2px 0;">Selected Dev: {{ selectedDeviceId || 'None' }}</p>
     <p style="margin:2px 0;">Mirroring: {{ isMirroring }}</p>
     <p style="margin:2px 0;">Remote Path: {{ currentRemotePath }}</p>
@@ -310,19 +383,23 @@ watch(selectedDeviceId, (newId, oldId) => {
     <p style="margin:2px 0;">Upload%: {{ uploadProgress }}</p>
     <p style="margin:2px 0; color: sienna;">UploadErr: {{ uploadError || 'N' }}</p>
     <p style="margin:2px 0; color: green;">UploadOK: {{ uploadSuccessMessage || 'N' }}</p>
+    <p style="margin:2px 0; font-weight: bold;">LastAPK Filename: {{ lastUploadedApkInfo?.filename || 'N' }}</p>
+    <p style="margin:2px 0; font-weight: bold;">LastAPK RemotePath: {{ lastUploadedApkInfo?.remotePath || 'N' }}</p>
+    <p style="margin:2px 0;">InstallingAPK: {{ isInstallingApk }}</p>
+    <p style="margin:2px 0; color: green;">InstallOK: {{ apkInstallMessage || 'N' }}</p>
+    <p style="margin:2px 0; color: sienna;">InstallErr: {{ apkInstallError || 'N' }}</p>
   </div>
 
   <div class="phone-page">
     <header>
       <h1>手机连接与管理</h1>
-      <button @click="fetchDevices" :disabled="isLoading || isMirroring || isUploadingFile" class="refresh-btn">
+      <button @click="fetchDevices" :disabled="isLoading || isMirroring || isUploadingFile || isInstallingApk" class="refresh-btn">
         {{ isLoading ? '刷新中...' : '刷新设备列表' }}
       </button>
     </header>
 
     <section v-if="isLoading" class="loading-section"><p>正在加载设备列表...</p></section>
-    <section v-if="errorMessage && !isLoading && !isMirroring" class="error-section global-error-message"><p
-        class="error-message">{{ errorMessage }}</p></section>
+    <section v-if="errorMessage && !isLoading && !isMirroring" class="error-section global-error-message"><p class="error-message">{{ errorMessage }}</p></section>
     <section v-if="!isLoading && devices.length > 0" class="devices-list-section">
       <h2>选择一个设备进行操作:</h2>
       <ul class="device-list">
@@ -346,13 +423,10 @@ watch(selectedDeviceId, (newId, oldId) => {
       <section class="action-section screen-mirror-section">
         <h4>屏幕镜像</h4>
         <div class="mirror-controls">
-          <button @click="startScreenMirroring" :disabled="isMirroring || !selectedDeviceId || isUploadingFile"
-                  class="control-btn start-btn">开始屏幕镜像
-          </button>
-          <button @click="stopScreenMirroring" :disabled="!isMirroring" class="control-btn stop-btn">停止屏幕镜像
-          </button>
+          <button @click="startScreenMirroring" :disabled="isMirroring || !selectedDeviceId || isUploadingFile || isInstallingApk" class="control-btn start-btn">开始屏幕镜像</button>
+          <button @click="stopScreenMirroring" :disabled="!isMirroring" class="control-btn stop-btn">停止屏幕镜像</button>
         </div>
-        <div v-if="isMirroring && errorMessage && !fileListError && !uploadError" class="error-section mirror-error">
+        <div v-if="isMirroring && errorMessage && !fileListError && !uploadError && !apkInstallError" class="error-section mirror-error">
           <p class="error-message">{{ errorMessage }}</p>
         </div>
         <div v-if="isMirroring" class="mirror-display-area">
@@ -366,15 +440,11 @@ watch(selectedDeviceId, (newId, oldId) => {
       <section class="action-section file-browser-section">
         <h4>文件浏览器</h4>
         <div class="path-navigation">
-          <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径"
-                 :disabled="isFileListing || isUploadingFile || !selectedDeviceId"/>
-          <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || !selectedDeviceId"
-                  class="control-btn">
+          <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径" :disabled="isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" />
+          <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" class="control-btn">
             {{ isFileListing ? '加载中...' : '转到路径' }}
           </button>
-          <button @click="navigateUp"
-                  :disabled="!canNavigateUp || isFileListing || isUploadingFile || !selectedDeviceId"
-                  class="control-btn up-btn">
+          <button @click="navigateUp" :disabled="!canNavigateUp || isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" class="control-btn up-btn">
             返回上一级
           </button>
         </div>
@@ -385,10 +455,9 @@ watch(selectedDeviceId, (newId, oldId) => {
               @change="handleFileSelect"
               ref="fileInputRef"
               style="display: none;"
-              :disabled="isUploadingFile || !selectedDeviceId"
+              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk"
           />
-          <button @click="triggerFileInput" class="control-btn choose-file-btn"
-                  :disabled="isUploadingFile || !selectedDeviceId">
+          <button @click="triggerFileInput" class="control-btn choose-file-btn" :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk">
             选择文件
           </button>
           <span v-if="selectedFileToUpload" class="selected-file-name">
@@ -398,7 +467,7 @@ watch(selectedDeviceId, (newId, oldId) => {
               v-if="selectedFileToUpload"
               @click="uploadSelectedFile"
               class="control-btn upload-btn"
-              :disabled="isUploadingFile || !selectedDeviceId"
+              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk"
           >
             {{ isUploadingFile ? `上传中... ${uploadProgress}%` : '上传到当前目录' }}
           </button>
@@ -414,16 +483,31 @@ watch(selectedDeviceId, (newId, oldId) => {
         <div v-if="uploadError" class="error-message upload-status-message">
           {{ uploadError }}
         </div>
+        <div v-if="lastUploadedApkInfo" class="apk-install-area">
+          <p class="apk-info">检测到已上传APK: <strong>{{ lastUploadedApkInfo.filename }}</strong></p>
+          <p class="apk-info-path">路径: {{ lastUploadedApkInfo.remotePath }}</p>
+          <button
+              @click="installUploadedApk"
+              class="control-btn install-apk-btn"
+              :disabled="isInstallingApk || isUploadingFile || !selectedDeviceId"
+          >
+            {{ isInstallingApk ? '正在安装...' : `安装 ${lastUploadedApkInfo.filename}` }}
+          </button>
+        </div>
+        <div v-if="apkInstallMessage" class="success-message install-status-message">
+          <pre>{{ apkInstallMessage }}</pre>
+        </div>
+        <div v-if="apkInstallError" class="error-message install-status-message">
+          <pre>{{ apkInstallError }}</pre>
+        </div>
         <div v-if="isFileListing" class="loading-section"><p>正在加载文件列表...</p></div>
-        <div v-if="fileListError && !isFileListing" class="error-section"><p class="error-message">{{
-            fileListError
-          }}</p></div>
+        <div v-if="fileListError && !isFileListing" class="error-section"><p class="error-message">{{ fileListError }}</p></div>
 
         <div v-if="!isFileListing && !fileListError && fileList.length > 0" class="file-list-container">
           <ul>
             <li
                 v-for="item in fileList"
-                :key="item.name + (item.isDir ? '/' : '')" class="file-item"
+                :key="item.name + (item.isDir ? '/' : '')"  class="file-item"
                 :class="{ 'is-dir': item.isDir }"
                 @click="navigateTo(item)"
                 :title="item.isDir ? `进入目录: ${item.name}` : `文件: ${item.name} (点击下载)`"
@@ -433,9 +517,7 @@ watch(selectedDeviceId, (newId, oldId) => {
             </li>
           </ul>
         </div>
-        <div
-            v-if="!isFileListing && !fileListError && fileList.length === 0 && currentRemotePath && selectedDeviceId && !errorMessage"
-            class="no-files-section">
+        <div v-if="!isFileListing && !fileListError && fileList.length === 0 && currentRemotePath && selectedDeviceId && !errorMessage" class="no-files-section">
           <p>目录 “{{ currentRemotePath }}” 为空或无法访问。</p>
         </div>
       </section>
@@ -448,427 +530,140 @@ watch(selectedDeviceId, (newId, oldId) => {
 </template>
 
 <style scoped>
-/* 保持之前提供的完整样式列表，除了移除APK安装相关的特定样式 */
 /* 基本页面和头部 */
-.phone-page {
-  max-width: 850px;
-  margin: 20px auto;
-  padding: 25px;
-  background-color: #fcfdff;
-  border-radius: 10px;
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-}
-
-.phone-page header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid #e9ecef;
-  padding-bottom: 18px;
-  margin-bottom: 25px;
-}
-
-.phone-page header h1 {
-  margin: 0;
-  font-size: 2em;
-  color: #2c3e50;
-}
-
-.refresh-btn {
-  padding: 9px 18px;
-  background-color: #007bff;
-  color: white;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-  font-size: 0.95em;
-}
-
-.refresh-btn:disabled {
-  background-color: #ced4da;
-  cursor: not-allowed;
-}
-
-.refresh-btn:not(:disabled):hover {
-  background-color: #0056b3;
-}
+.phone-page { max-width: 850px; margin: 20px auto; padding: 25px; background-color: #fcfdff; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+.phone-page header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e9ecef; padding-bottom: 18px; margin-bottom: 25px; }
+.phone-page header h1 { margin: 0; font-size: 2em; color: #2c3e50; }
+.refresh-btn { padding: 9px 18px; background-color: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; transition: background-color 0.2s; font-size: 0.95em; }
+.refresh-btn:disabled { background-color: #ced4da; cursor: not-allowed; }
+.refresh-btn:not(:disabled):hover { background-color: #0056b3; }
 
 /* 通用状态显示 */
-.loading-section p {
-  text-align: center;
-  padding: 25px;
-  font-size: 1.1em;
-  color: #6c757d;
-}
-
-.error-section.global-error-message {
-  margin-bottom: 20px;
-}
-
+.loading-section p { text-align: center; padding: 25px; font-size: 1.1em; color: #6c757d; }
+.error-section.global-error-message { margin-bottom: 20px; }
 .error-section p.error-message,
 .mirror-error p.error-message,
-.upload-status-message.error-message {
-  color: #721c24;
-  background-color: #f8d7da;
-  border: 1px solid #f5c6cb;
-  padding: 12px 15px;
-  border-radius: 5px;
-  text-align: left;
-  margin-top: 12px;
-  word-break: break-word;
-  font-size: 0.95em;
+.upload-status-message.error-message,
+.install-status-message.error-message { /* 统一错误消息样式 */
+  color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb;
+  padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
+}
+.success-message.upload-status-message,
+.success-message.install-status-message { /* 统一成功消息样式 */
+  color: #155724; background-color: #d4edda; border: 1px solid #c3e6cb;
+  padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
+}
+/* 为安装消息中的 pre 标签添加样式 */
+.install-status-message pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+  max-height: 150px; /* 限制最大高度 */
+  overflow-y: auto;  /* 超出则滚动 */
+  background-color: rgba(0,0,0,0.03); /* 轻微背景色区分 */
+  padding: 8px;
+  margin-top: 5px; /* 与主消息的间距 */
+  border-radius: 3px;
 }
 
-.success-message.upload-status-message {
-  color: #155724;
-  background-color: #d4edda;
-  border: 1px solid #c3e6cb;
-  padding: 12px 15px;
-  border-radius: 5px;
-  text-align: left;
-  margin-top: 12px;
-  word-break: break-word;
-  font-size: 0.95em;
-}
-
-/* 移除了 .success-message pre, .error-message pre 相关的APK安装输出样式 */
 
 /* 设备列表 */
-.devices-list-section h2 {
-  margin-top: 0;
-  margin-bottom: 12px;
-  color: #495057;
-  font-size: 1.3em;
-  text-align: left;
-}
-
-.no-devices-section p {
-  text-align: center;
-  padding: 18px;
-  background-color: #fff3cd;
-  border: 1px solid #ffeeba;
-  color: #856404;
-  border-radius: 5px;
-}
-
-.device-list {
-  list-style-type: none;
-  padding: 0;
-  margin-bottom: 25px;
-}
-
-.device-item {
-  background-color: #f8f9fa;
-  border: 1px solid #dee2e6;
-  padding: 14px 18px;
-  margin-bottom: 10px;
-  border-radius: 5px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  cursor: pointer;
-  transition: background-color 0.2s, border-color 0.2s;
-}
-
-.device-item:hover {
-  background-color: #e9ecef;
-  border-color: #ced4da;
-}
-
-.device-item.selected {
-  background-color: #cce5ff;
-  border-left: 5px solid #007bff;
-  font-weight: bold;
-}
-
-.device-item span {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
-  color: #212529;
-}
-
-.device-item span.status-device-ok {
-  color: #28a745;
-  font-weight: bold;
-}
+.devices-list-section h2 { margin-top: 0; margin-bottom: 12px; color: #495057; font-size: 1.3em; text-align: left; }
+.no-devices-section p { text-align: center; padding: 18px; background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; border-radius: 5px; }
+.device-list { list-style-type: none; padding: 0; margin-bottom: 25px; }
+.device-item { background-color: #f8f9fa; border: 1px solid #dee2e6; padding: 14px 18px; margin-bottom: 10px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background-color 0.2s, border-color 0.2s; }
+.device-item:hover { background-color: #e9ecef; border-color: #ced4da; }
+.device-item.selected { background-color: #cce5ff; border-left: 5px solid #007bff; font-weight: bold; }
+.device-item span { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace; color: #212529; }
+.device-item span.status-device-ok { color: #28a745; font-weight: bold; }
 
 /* 选中设备后的操作区 */
-.selected-device-actions {
-  margin-top: 25px;
-  padding-top: 25px;
-}
-
-.selected-device-actions > h3 {
-  text-align: center;
-  color: #2c3e50;
-  margin-bottom: 25px;
-  font-size: 1.5em;
-}
-
-.section-divider {
-  border: none;
-  border-top: 1px dashed #ced4da;
-  margin: 30px 0;
-}
-
-.action-section {
-  margin-bottom: 30px;
-  padding: 22px;
-  border: 1px solid #e9ecef;
-  border-radius: 8px;
-  background-color: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-.action-section h4 {
-  margin-top: 0;
-  margin-bottom: 18px;
-  color: #007bff;
-  border-bottom: 1px solid #f1f3f5;
-  padding-bottom: 12px;
-  font-size: 1.4em;
-  text-align: left;
-}
+.selected-device-actions { margin-top: 25px; padding-top: 25px; }
+.selected-device-actions > h3 { text-align: center; color: #2c3e50; margin-bottom: 25px; font-size: 1.5em; }
+.section-divider { border: none; border-top: 1px dashed #ced4da; margin: 30px 0; }
+.action-section { margin-bottom: 30px; padding: 22px; border: 1px solid #e9ecef; border-radius: 8px; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+.action-section h4 { margin-top: 0; margin-bottom: 18px; color: #007bff; border-bottom: 1px solid #f1f3f5; padding-bottom: 12px; font-size: 1.4em; text-align: left; }
 
 /* 通用控制按钮 */
-.control-btn {
-  padding: 9px 16px;
-  margin: 5px;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  font-size: 0.95em;
-  transition: background-color 0.2s, opacity 0.2s;
-  line-height: 1.5;
-}
-
-.control-btn:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
-}
+.control-btn { padding: 9px 16px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-size: 0.95em; transition: background-color 0.2s, opacity 0.2s; line-height: 1.5; }
+.control-btn:disabled { opacity: 0.65; cursor: not-allowed; }
 
 /* 屏幕镜像 */
-.screen-mirror-section .mirror-controls {
-  margin-bottom: 20px;
-  text-align: center;
-}
-
-.screen-mirror-section .start-btn {
-  background-color: #28a745;
-  color: white;
-}
-
-.screen-mirror-section .start-btn:not(:disabled):hover {
-  background-color: #218838;
-}
-
-.screen-mirror-section .stop-btn {
-  background-color: #dc3545;
-  color: white;
-}
-
-.screen-mirror-section .stop-btn:not(:disabled):hover {
-  background-color: #c82333;
-}
-
-.screen-mirror-section .mirror-display-area {
-  margin-top: 15px;
-  padding: 10px;
-  border: 1px dashed #ced4da;
-  min-height: 220px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background-color: #f8f9fa;
-}
-
-.screen-mirror-section .mirrored-screen-canvas {
-  max-width: 100%;
-  max-height: 480px;
-  border: 1px solid #dee2e6;
-  display: block;
-  margin: auto;
-  background-color: #000;
-}
-
-.screen-mirror-section .mirror-display-area p {
-  color: #6c757d;
-}
+.screen-mirror-section .mirror-controls { margin-bottom: 20px; text-align: center; }
+.screen-mirror-section .start-btn { background-color: #28a745; color: white; }
+.screen-mirror-section .start-btn:not(:disabled):hover { background-color: #218838; }
+.screen-mirror-section .stop-btn { background-color: #dc3545; color: white; }
+.screen-mirror-section .stop-btn:not(:disabled):hover { background-color: #c82333; }
+.screen-mirror-section .mirror-display-area { margin-top: 15px; padding: 10px; border: 1px dashed #ced4da; min-height: 220px; display: flex; justify-content: center; align-items: center; background-color: #f8f9fa; }
+.screen-mirror-section .mirrored-screen-canvas { max-width: 100%; max-height: 480px; border: 1px solid #dee2e6; display: block; margin: auto; background-color: #000; }
+.screen-mirror-section .mirror-display-area p { color: #6c757d; }
 
 /* 文件浏览 */
-.file-browser-section .path-navigation {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 18px;
-}
-
-.file-browser-section .path-navigation input[type="text"] {
-  flex-grow: 1;
-  min-width: 220px;
-  padding: 9px 12px;
-  border: 1px solid #ced4da;
-  border-radius: 5px;
-  font-size: 0.95em;
-}
-
-.file-browser-section .path-navigation .control-btn {
-  padding: 9px 14px;
-  font-size: 0.9em;
-  white-space: nowrap;
-}
-
-.file-browser-section .path-navigation .up-btn {
-  background-color: #6c757d;
-  color: white;
-}
-
-.file-browser-section .path-navigation .up-btn:not(:disabled):hover {
-  background-color: #5a6268;
-}
+.file-browser-section .path-navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
+.file-browser-section .path-navigation input[type="text"] { flex-grow: 1; min-width: 220px; padding: 9px 12px; border: 1px solid #ced4da; border-radius: 5px; font-size: 0.95em; }
+.file-browser-section .path-navigation .control-btn { padding: 9px 14px; font-size: 0.9em; white-space: nowrap; }
+.file-browser-section .path-navigation .up-btn { background-color: #6c757d; color:white; }
+.file-browser-section .path-navigation .up-btn:not(:disabled):hover { background-color: #5a6268; }
 
 /* 文件上传 */
-.file-upload-area {
+.file-upload-area { margin-top: 18px; margin-bottom: 18px; padding: 12px; background-color: #f0f3f5; border: 1px dashed #ced4da; border-radius: 5px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.file-upload-area .choose-file-btn { background-color: #17a2b8; color: white; }
+.file-upload-area .choose-file-btn:not(:disabled):hover { background-color: #138496; }
+.file-upload-area .upload-btn { background-color: #28a745; color: white; }
+.file-upload-area .upload-btn:not(:disabled):hover { background-color: #218838; }
+.selected-file-name { font-style: italic; color: #495057; font-size: 0.9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; flex-shrink: 1; }
+.upload-progress-bar-container { width: 100%; background-color: #e9ecef; border-radius: 5px; margin-bottom: 12px; height: 22px; overflow: hidden; }
+.upload-progress-bar { width: 0%; height: 100%; background-color: #007bff; color: white; text-align: center; line-height: 22px; font-size: 0.85em; transition: width 0.3s ease-out; }
+
+/* APK 安装 (重新添加) */
+.apk-install-area {
   margin-top: 18px;
-  margin-bottom: 18px;
-  padding: 12px;
-  background-color: #f0f3f5;
-  border: 1px dashed #ced4da;
+  padding: 15px;
+  background-color: #e7f3fe; /* 淡蓝色背景 */
+  border: 1px solid #b6d4fe;
   border-radius: 5px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
 }
-
-.file-upload-area .choose-file-btn {
-  background-color: #17a2b8;
-  color: white;
+.apk-install-area .apk-info, .apk-install-area .apk-info-path {
+  font-size: 0.95em;
+  color: #004085; /* 深蓝色文字 */
+  margin: 5px 0;
+  word-break: break-all; /* 防止长路径破坏布局 */
 }
-
-.file-upload-area .choose-file-btn:not(:disabled):hover {
-  background-color: #138496;
+.apk-install-area .apk-info strong {
+  font-weight: 600;
 }
-
-.file-upload-area .upload-btn {
-  background-color: #28a745;
-  color: white;
+.apk-install-area .install-apk-btn {
+  background-color: #ffc107; /* 警告黄色按钮 */
+  color: #212529; /* 深色文字 */
+  margin-top: 10px;
 }
-
-.file-upload-area .upload-btn:not(:disabled):hover {
-  background-color: #218838;
+.apk-install-area .install-apk-btn:not(:disabled):hover {
+  background-color: #e0a800;
 }
-
-.selected-file-name {
-  font-style: italic;
-  color: #495057;
-  font-size: 0.9em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 220px;
-  flex-shrink: 1;
-}
-
-.upload-progress-bar-container {
-  width: 100%;
-  background-color: #e9ecef;
-  border-radius: 5px;
-  margin-bottom: 12px;
-  height: 22px;
-  overflow: hidden;
-}
-
-.upload-progress-bar {
-  width: 0%;
-  height: 100%;
-  background-color: #007bff;
-  color: white;
-  text-align: center;
-  line-height: 22px;
-  font-size: 0.85em;
-  transition: width 0.3s ease-out;
-}
-
-/* APK 安装相关样式已被移除 */
+/* 安装状态消息样式已通过复用 .success-message 和 .error-message 处理 */
 
 /* 文件列表容器 */
-.file-browser-section .file-list-container ul {
-  list-style-type: none;
-  padding: 0;
-  max-height: 380px;
-  overflow-y: auto;
-  border: 1px solid #dee2e6;
-  border-radius: 5px;
-  background-color: #ffffff;
-}
-
-.file-browser-section .file-item {
-  display: flex;
-  align-items: center;
-  padding: 11px 14px;
-  border-bottom: 1px solid #f1f3f5;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.file-browser-section .file-item:last-child {
-  border-bottom: none;
-}
-
-.file-browser-section .file-item:hover {
-  background-color: #e9f5ff;
-}
-
-.file-browser-section .file-item.is-dir .file-name {
-  font-weight: 600;
-  color: #0056b3;
-}
-
-.file-browser-section .file-icon {
-  margin-right: 12px;
-  font-size: 1.25em;
-  color: #6c757d;
-}
-
-.file-browser-section .file-item.is-dir .file-icon {
-  color: #007bff;
-}
-
-.file-browser-section .file-name {
-  word-break: break-all;
-  color: #212529;
-  font-size: 0.95em;
-}
-
-.file-browser-section .no-files-section p {
-  text-align: center;
-  padding: 18px;
-  background-color: #f8f9fa;
-  border: 1px solid #dee2e6;
-  color: #495057;
-  border-radius: 5px;
-  margin-top: 12px;
-}
+.file-browser-section .file-list-container ul { list-style-type: none; padding: 0; max-height: 380px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 5px; background-color: #ffffff; }
+.file-browser-section .file-item { display: flex; align-items: center; padding: 11px 14px; border-bottom: 1px solid #f1f3f5; cursor: pointer; transition: background-color 0.2s; }
+.file-browser-section .file-item:last-child { border-bottom: none; }
+.file-browser-section .file-item:hover { background-color: #e9f5ff; }
+.file-browser-section .file-item.is-dir .file-name { font-weight: 600; color: #0056b3; }
+.file-browser-section .file-icon { margin-right: 12px; font-size: 1.25em; color: #6c757d; }
+.file-browser-section .file-item.is-dir .file-icon { color: #007bff; }
+.file-browser-section .file-name { word-break: break-all; color: #212529; font-size: 0.95em; }
+.file-browser-section .no-files-section p { text-align: center; padding: 18px; background-color: #f8f9fa; border: 1px solid #dee2e6; color: #495057; border-radius: 5px; margin-top: 12px; }
 
 /* 底部导航 */
-.navigation {
-  margin-top: 35px;
-  text-align: center;
-  padding-top: 22px;
-  border-top: 1px solid #e9ecef;
-}
-
-.navigation a {
-  color: #007bff;
-  text-decoration: none;
-  font-size: 1.05em;
-}
-
-.navigation a:hover {
-  text-decoration: underline;
-}
-
+.navigation { margin-top: 35px; text-align: center; padding-top: 22px; border-top: 1px solid #e9ecef; }
+.navigation a { color: #007bff; text-decoration: none; font-size: 1.05em; }
+.navigation a:hover { text-decoration: underline; }
 </style>
+```
+
+**请注意：**
+* 这份代码假设您后端的 APK 安装接口 (`POST /api/devices/:deviceId/apk/install`) 和 `adb.InstallAPK` 函数已经按照我们之前讨论的、使用 `adb shell pm install` 的方式修改好了。
+* APK 安装的成功与否判断是基于后端返回的 `details` 字段中是否包含 "success" (不区分大小写)。这可能需要根据您实际测试中 ADB 的输出进行微调。
+* 仍然建议您先用一个简单的、不含空格的文件名（如 `test.apk`）上传到 `/data/local/tmp/` 目录，然后尝试安装，以排除文件名和路径权限的干扰。
+
+请使用这个完整的代码替换您现有的 `PhonePage.vue`，然后重启前端开发服务器进行

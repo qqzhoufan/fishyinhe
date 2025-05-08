@@ -28,10 +28,10 @@ func SetupRouter() *gin.Engine {
 			// 未来可以添加 POST (上传), GET (下载特定文件), DELETE 等
 		}
 
-		//apkRoutes := apiV1.Group("/devices/:deviceId/apk")
-		//{
-		//	apkRoutes.POST("/install", handler.InstallAPKHandler) // <--- 新增这行
-		//}
+		apkRoutes := apiV1.Group("/devices/:deviceId/apk")
+		{
+			apkRoutes.POST("/install", handler.InstallAPKHandler) // <--- 新增这行
+		}
 	}
 
 	return router

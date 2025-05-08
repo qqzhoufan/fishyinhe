@@ -208,37 +208,45 @@ func InstallAPK(deviceId string, remoteApkPathOnDevice string) (string, error) {
 		return "", fmt.Errorf("InstallAPK: deviceId and remoteApkPathOnDevice cannot be empty")
 	}
 
-	log.Printf("Attempting to install APK '%s' on device '%s'", remoteApkPathOnDevice, deviceId)
+	// 打印将要执行的命令的准确形式
+	// 注意：路径传递给 shell 时，可能需要额外处理特殊字符或引号，但 exec.Command 通常会处理好参数分隔
+	log.Printf("InstallAPK: Preparing to execute: adb -s \"%s\" shell pm install -r -g \"%s\"", deviceId, remoteApkPathOnDevice)
 
-	// adb -s <deviceId> install -r -g "<remoteApkPathOnDevice>"
-	// -r: replace existing application
-	// -g: grant all runtime permissions
-	cmd := exec.Command("adb", "-s", deviceId, "install", "-r", "-g", remoteApkPathOnDevice)
-	var out bytes.Buffer // adb install 的输出通常在 stdout
+	// 构建命令: adb -s <deviceId> shell pm install -r -g <remoteApkPathOnDevice>
+	// 参数应该是 "shell", "pm", "install", "-r", "-g", remoteApkPathOnDevice
+	cmd := exec.Command("adb", "-s", deviceId, "shell", "pm", "install", "-r", "-g", remoteApkPathOnDevice)
+	var out bytes.Buffer // pm install 的输出通常在 stdout
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	// adb install 命令在成功时返回退出码0，输出中通常包含 "Success"
+	// pm install 成功时返回退出码 0，输出通常包含 "Success"
 	// 失败时，输出和 stderr 中会有错误信息
-	output := strings.TrimSpace(out.String() + "\n" + stderr.String())
+	output := strings.TrimSpace(out.String() + "\n" + stderr.String()) // 合并 stdout 和 stderr
+
+	log.Printf("InstallAPK: 'adb shell pm install' command for device '%s', APK '%s' finished.", deviceId, remoteApkPathOnDevice)
+	log.Printf("InstallAPK: Stdout: [%s]", strings.TrimSpace(out.String()))
+	log.Printf("InstallAPK: Stderr: [%s]", strings.TrimSpace(stderr.String()))
+	log.Printf("InstallAPK: Combined output: [%s]", output)
 
 	if err != nil {
 		// 即使有 cmd.Run() 错误，output 也可能包含有用的 ADB 错误信息
-		errMsg := fmt.Sprintf("Failed to execute adb install for APK '%s' on device '%s': %v. Output: %s",
+		errMsg := fmt.Sprintf("InstallAPK: Failed to execute adb shell pm install for APK '%s' on device '%s': %v. Full Output: %s",
 			remoteApkPathOnDevice, deviceId, err, output)
 		log.Println(errMsg)
+		// 检查输出是否包含 "No such file or directory" 或类似错误
+		if strings.Contains(output, "No such file or directory") || strings.Contains(output, "can't find") || strings.Contains(output, "doesn't exist") {
+			return output, fmt.Errorf("file not found on device: %s. Output: %s", remoteApkPathOnDevice, output)
+		}
 		return output, fmt.Errorf("adb command execution failed: %v. Output: %s", err, output)
 	}
 
-	log.Printf("APK installation command executed for '%s' on device '%s'. Output: %s", remoteApkPathOnDevice, deviceId, output)
+	log.Printf("InstallAPK: APK installation command executed successfully (cmd.Run returned nil) for '%s' on device '%s'. Output: %s", remoteApkPathOnDevice, deviceId, output)
 	// 检查输出是否明确包含 "Success"
-	if !strings.Contains(output, "Success") {
-		// 如果没有 "Success" 且 cmd.Run() 没有错误，这可能是一个不明确的状态，但通常意味着失败或警告
-		log.Printf("Warning: APK installation for '%s' on device '%s' did not explicitly report 'Success'. Output: %s", remoteApkPathOnDevice, deviceId, output)
-		// 仍将输出返回，让调用者判断
-		// 可以考虑返回一个自定义错误，如果 "Success" 关键字不存在
+	if !strings.Contains(strings.ToLower(output), "success") {
+		log.Printf("InstallAPK: Warning - Output for device '%s', APK '%s' did not explicitly contain 'success'. Full Output: %s", deviceId, remoteApkPathOnDevice, output)
+		// 可以考虑返回一个特定错误，如果需要前端明确知道安装是否真的成功
 		// return output, fmt.Errorf("installation did not report success: %s", output)
 	}
 
