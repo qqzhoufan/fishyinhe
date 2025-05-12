@@ -56,7 +56,7 @@ func ScreenMirrorWS(c *gin.Context) {
 	defer conn.Close()
 	log.Printf("ScreenMirrorWS: WebSocket connection established for screen mirroring & input: %s, device: %s", conn.RemoteAddr(), deviceId)
 
-	frameInterval := 40 * time.Millisecond
+	frameInterval := 10 * time.Millisecond
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 

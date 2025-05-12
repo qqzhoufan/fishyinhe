@@ -658,7 +658,7 @@ watch(selectedDeviceId, (newId, oldId) => {
           <p class="error-message">{{ errorMessage }}</p>
         </div>
         <div v-if="isMirroring" class="mirror-display-area">
-          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击或拖拽此处可在手机上模拟操作"></canvas> <p v-if="!canvasCtx && isMirroring">正在初始化画布...</p>
+          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击或拖拽此处可在手机上模拟操作"></canvas> <p v-if="!canvasCtx && isMirroring">...</p>
         </div>
       </section>
 
@@ -676,6 +676,46 @@ watch(selectedDeviceId, (newId, oldId) => {
         <p v-if="goHomeMessage" class="status-message" :class="{'error': goHomeMessage.toLowerCase().includes('错误') || goHomeMessage.toLowerCase().includes('失败')}">
           {{ goHomeMessage }}
         </p>
+      </section>
+
+      <section class="action-section app-management-section">
+        <h4>应用管理</h4>
+        <div class="app-list-controls">
+          <label for="appFilter">过滤应用: </label>
+          <select id="appFilter" v-model="appFilterOption" @change="fetchInstalledApps" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
+            <option value="">所有应用</option>
+            <option value="third_party">仅第三方应用</option>
+          </select>
+          <button @click="fetchInstalledApps" class="control-btn" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
+            {{ isLoadingApps ? '加载中...' : '加载应用列表' }}
+          </button>
+        </div>
+
+        <div v-if="isLoadingApps" class="loading-section"><p>正在加载应用列表...</p></div>
+        <div v-if="appsListError && !isLoadingApps" class="error-section"><p class="error-message">{{ appsListError }}</p></div>
+
+        <div v-if="uninstallStatusMessage" class="status-message uninstall-feedback" :class="{'error': uninstallStatusMessage.toLowerCase().includes('失败') || uninstallStatusMessage.toLowerCase().includes('错误')}">
+          <pre>{{ uninstallStatusMessage }}</pre>
+        </div>
+
+        <div v-if="!isLoadingApps && !appsListError && installedApps.length > 0" class="installed-apps-container">
+          <h5>已安装应用包名 ({{ installedApps.length }}):</h5>
+          <ul>
+            <li v-for="pkg in installedApps" :key="pkg" class="app-item">
+              <span class="app-package-name">{{ pkg }}</span>
+              <button
+                  @click="confirmAndUninstallApp(pkg)"
+                  class="control-btn uninstall-app-btn"
+                  :disabled="uninstallingPackage === pkg || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"
+              >
+                {{ uninstallingPackage === pkg ? '卸载中...' : '卸载' }}
+              </button>
+            </li>
+          </ul>
+        </div>
+        <div v-if="!isLoadingApps && !appsListError && installedApps.length === 0 && selectedDeviceId" class="no-apps-section">
+          <p>未找到已安装的应用 (或符合当前过滤条件的应用)。</p>
+        </div>
       </section>
 
       <hr class="section-divider">
@@ -787,45 +827,45 @@ watch(selectedDeviceId, (newId, oldId) => {
 
       <hr class="section-divider">
 
-      <section class="action-section app-management-section">
-        <h4>应用管理</h4>
-        <div class="app-list-controls">
-          <label for="appFilter">过滤应用: </label>
-          <select id="appFilter" v-model="appFilterOption" @change="fetchInstalledApps" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
-            <option value="">所有应用</option>
-            <option value="third_party">仅第三方应用</option>
-          </select>
-          <button @click="fetchInstalledApps" class="control-btn" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
-            {{ isLoadingApps ? '加载中...' : '加载应用列表' }}
-          </button>
-        </div>
+<!--      <section class="action-section app-management-section">-->
+<!--        <h4>应用管理</h4>-->
+<!--        <div class="app-list-controls">-->
+<!--          <label for="appFilter">过滤应用: </label>-->
+<!--          <select id="appFilter" v-model="appFilterOption" @change="fetchInstalledApps" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">-->
+<!--            <option value="">所有应用</option>-->
+<!--            <option value="third_party">仅第三方应用</option>-->
+<!--          </select>-->
+<!--          <button @click="fetchInstalledApps" class="control-btn" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">-->
+<!--            {{ isLoadingApps ? '加载中...' : '加载应用列表' }}-->
+<!--          </button>-->
+<!--        </div>-->
 
-        <div v-if="isLoadingApps" class="loading-section"><p>正在加载应用列表...</p></div>
-        <div v-if="appsListError && !isLoadingApps" class="error-section"><p class="error-message">{{ appsListError }}</p></div>
+<!--        <div v-if="isLoadingApps" class="loading-section"><p>正在加载应用列表...</p></div>-->
+<!--        <div v-if="appsListError && !isLoadingApps" class="error-section"><p class="error-message">{{ appsListError }}</p></div>-->
 
-        <div v-if="uninstallStatusMessage" class="status-message uninstall-feedback" :class="{'error': uninstallStatusMessage.toLowerCase().includes('失败') || uninstallStatusMessage.toLowerCase().includes('错误')}">
-          <pre>{{ uninstallStatusMessage }}</pre>
-        </div>
+<!--        <div v-if="uninstallStatusMessage" class="status-message uninstall-feedback" :class="{'error': uninstallStatusMessage.toLowerCase().includes('失败') || uninstallStatusMessage.toLowerCase().includes('错误')}">-->
+<!--          <pre>{{ uninstallStatusMessage }}</pre>-->
+<!--        </div>-->
 
-        <div v-if="!isLoadingApps && !appsListError && installedApps.length > 0" class="installed-apps-container">
-          <h5>已安装应用包名 ({{ installedApps.length }}):</h5>
-          <ul>
-            <li v-for="pkg in installedApps" :key="pkg" class="app-item">
-              <span class="app-package-name">{{ pkg }}</span>
-              <button
-                  @click="confirmAndUninstallApp(pkg)"
-                  class="control-btn uninstall-app-btn"
-                  :disabled="uninstallingPackage === pkg || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"
-              >
-                {{ uninstallingPackage === pkg ? '卸载中...' : '卸载' }}
-              </button>
-            </li>
-          </ul>
-        </div>
-        <div v-if="!isLoadingApps && !appsListError && installedApps.length === 0 && selectedDeviceId" class="no-apps-section">
-          <p>未找到已安装的应用 (或符合当前过滤条件的应用)。</p>
-        </div>
-      </section>
+<!--        <div v-if="!isLoadingApps && !appsListError && installedApps.length > 0" class="installed-apps-container">-->
+<!--          <h5>已安装应用包名 ({{ installedApps.length }}):</h5>-->
+<!--          <ul>-->
+<!--            <li v-for="pkg in installedApps" :key="pkg" class="app-item">-->
+<!--              <span class="app-package-name">{{ pkg }}</span>-->
+<!--              <button-->
+<!--                  @click="confirmAndUninstallApp(pkg)"-->
+<!--                  class="control-btn uninstall-app-btn"-->
+<!--                  :disabled="uninstallingPackage === pkg || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"-->
+<!--              >-->
+<!--                {{ uninstallingPackage === pkg ? '卸载中...' : '卸载' }}-->
+<!--              </button>-->
+<!--            </li>-->
+<!--          </ul>-->
+<!--        </div>-->
+<!--        <div v-if="!isLoadingApps && !appsListError && installedApps.length === 0 && selectedDeviceId" class="no-apps-section">-->
+<!--          <p>未找到已安装的应用 (或符合当前过滤条件的应用)。</p>-->
+<!--        </div>-->
+<!--      </section>-->
 
       <hr class="section-divider">
 

@@ -388,3 +388,39 @@ func DumpLogcatToFile(deviceId string, tempDir string) (string, error) {
 	log.Printf("DumpLogcatToFile: Successfully dumped logcat for device '%s' to '%s'", deviceId, localTempFilePath)
 	return localTempFilePath, nil
 }
+func ForceStopPackage(deviceId string, packageName string) (string, error) {
+	if deviceId == "" || packageName == "" {
+		return "", fmt.Errorf("ForceStopPackage: deviceId and packageName cannot be empty")
+	}
+
+	log.Printf("ForceStopPackage: Attempting to force stop package '%s' on device '%s'", packageName, deviceId)
+
+	// adb -s <deviceId> shell am force-stop <packageName>
+	cmd := exec.Command("adb", "-s", deviceId, "shell", "am", "force-stop", packageName)
+	var out bytes.Buffer // am force-stop 通常没有太多 stdout 输出
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// am force-stop 成功时返回退出码 0
+	// 失败时，stderr 中会有错误信息
+	output := strings.TrimSpace(out.String() + "\n" + stderr.String()) // 合并 stdout 和 stderr
+
+	log.Printf("ForceStopPackage: 'adb shell am force-stop' command for device '%s', package '%s' finished.", deviceId, packageName)
+	log.Printf("ForceStopPackage: Stdout: [%s]", strings.TrimSpace(out.String()))
+	log.Printf("ForceStopPackage: Stderr: [%s]", strings.TrimSpace(stderr.String()))
+	log.Printf("ForceStopPackage: Combined output: [%s]", output)
+
+	if err != nil {
+		errMsg := fmt.Sprintf("ForceStopPackage: Failed to execute for package '%s' on device '%s': %v. Full Output: %s",
+			packageName, deviceId, err, output)
+		log.Println(errMsg)
+		return output, fmt.Errorf("adb force-stop command execution failed: %v. Output: %s", err, output)
+	}
+
+	// force-stop 成功通常没有 "Success" 字样，只要没有错误即可认为是成功
+	log.Printf("ForceStopPackage: Force-stop command executed (cmd.Run returned nil) for package '%s' on device '%s'. Output: %s", packageName, deviceId, output)
+
+	return output, nil
+}

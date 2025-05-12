@@ -91,3 +91,50 @@ func UninstallAppHandler(c *gin.Context) {
 		"packageName": packageName,
 	})
 }
+
+type ForceStopAppRequest struct {
+	PackageName string `json:"packageName" binding:"required"`
+}
+
+// ForceStopAppHandler 处理停止设备上应用的请求
+func ForceStopAppHandler(c *gin.Context) {
+	deviceId := c.Param("deviceId")
+	if deviceId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Device ID is required"})
+		return
+	}
+
+	var req ForceStopAppRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("ForceStopAppHandler: Error binding JSON for device %s: %v", deviceId, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
+		return
+	}
+
+	packageName := req.PackageName
+	if packageName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "packageName in request body is required"})
+		return
+	}
+
+	log.Printf("ForceStopAppHandler: Request to force stop package. Device: %s, Package: %s", deviceId, packageName)
+
+	output, err := adb.ForceStopPackage(deviceId, packageName)
+	if err != nil {
+		log.Printf("ForceStopAppHandler: Failed to force stop package on device %s, package %s: %v", deviceId, packageName, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":    "Failed to force stop package",
+			"details":  output,
+			"rawError": err.Error(),
+		})
+		return
+	}
+
+	log.Printf("ForceStopAppHandler: Force stop process for device %s, package %s, resulted in output: %s", deviceId, packageName, output)
+	// am force-stop 成功时通常没有特定输出，或者只是一行提示。主要看错误码。
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Force stop command executed",
+		"details":     output,
+		"packageName": packageName,
+	})
+}

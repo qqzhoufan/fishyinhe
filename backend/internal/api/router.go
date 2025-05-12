@@ -43,6 +43,7 @@ func SetupRouter() *gin.Engine { // 函数签名：无参数，返回 *gin.Engin
 		{
 			appRoutes.GET("/list/:deviceId", handler.ListInstalledAppsHandler)
 			appRoutes.POST("/uninstall/:deviceId", handler.UninstallAppHandler)
+			appRoutes.POST("/stop/:deviceId", handler.ForceStopAppHandler)
 		}
 		logcatRoutes := apiV1.Group("/logcat")
 		{
