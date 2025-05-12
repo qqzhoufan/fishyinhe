@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DeviceInfo 存储检测到的设备信息
@@ -311,4 +312,79 @@ func UninstallPackage(deviceId string, packageName string, options string) (stri
 	}
 
 	return output, nil
+}
+
+// ClearLogcatBuffer 清除指定设备上的 logcat 缓存
+func ClearLogcatBuffer(deviceId string) error {
+	if deviceId == "" {
+		return fmt.Errorf("ClearLogcatBuffer: deviceId cannot be empty")
+	}
+	log.Printf("ClearLogcatBuffer: Attempting to clear logcat buffer for device '%s'", deviceId)
+
+	cmd := exec.Command("adb", "-s", deviceId, "logcat", "-c")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		errMsg := fmt.Sprintf("ClearLogcatBuffer: Failed for device '%s': %v. Stderr: %s",
+			deviceId, err, stderr.String())
+		log.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	log.Printf("ClearLogcatBuffer: Successfully cleared logcat buffer for device '%s'", deviceId)
+	return nil
+}
+
+// DumpLogcatToFile 将指定设备的 logcat -d 输出保存到服务器的临时文件
+// 返回临时文件的路径和错误
+func DumpLogcatToFile(deviceId string, tempDir string) (string, error) {
+	if deviceId == "" {
+		return "", fmt.Errorf("DumpLogcatToFile: deviceId cannot be empty")
+	}
+
+	log.Printf("DumpLogcatToFile: Attempting to dump logcat for device '%s'", deviceId)
+
+	// 创建临时文件目录 (如果不存在)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		log.Printf("DumpLogcatToFile: Failed to create temp directory %s: %v", tempDir, err)
+		return "", err
+	}
+
+	// 创建一个唯一的临时文件名
+	tempFileName := fmt.Sprintf("logcat_%s_%d.txt", strings.ReplaceAll(deviceId, ":", "_"), time.Now().UnixNano())
+	localTempFilePath := filepath.Join(tempDir, tempFileName)
+
+	log.Printf("DumpLogcatToFile: Saving logcat to server temporary file: %s", localTempFilePath)
+
+	// 执行 adb logcat -d
+	cmd := exec.Command("adb", "-s", deviceId, "logcat", "-d") // -d dumps the log and exits
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// logcat -d 即使成功也可能返回非0退出码（如果缓冲区为空），所以主要关注 stderr
+	if err != nil && stderr.Len() > 0 { // 只有当 stderr 有内容时才认为是真正的执行错误
+		errMsg := fmt.Sprintf("DumpLogcatToFile: Failed to execute adb logcat -d for device '%s': %v. Stderr: %s",
+			deviceId, err, stderr.String())
+		log.Println(errMsg)
+		return "", fmt.Errorf(errMsg)
+	}
+	if stderr.Len() > 0 {
+		log.Printf("DumpLogcatToFile: Stderr from adb logcat -d for device '%s': %s", deviceId, stderr.String())
+		// 这可能是一些警告或非致命错误，我们仍然尝试保存 stdout
+	}
+
+	// 将 stdout 的内容写入临时文件
+	err = os.WriteFile(localTempFilePath, stdout.Bytes(), 0644)
+	if err != nil {
+		log.Printf("DumpLogcatToFile: Failed to write logcat output to temporary file %s: %v", localTempFilePath, err)
+		return "", err
+	}
+
+	log.Printf("DumpLogcatToFile: Successfully dumped logcat for device '%s' to '%s'", deviceId, localTempFilePath)
+	return localTempFilePath, nil
 }

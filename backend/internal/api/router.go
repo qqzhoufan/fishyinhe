@@ -44,6 +44,11 @@ func SetupRouter() *gin.Engine { // 函数签名：无参数，返回 *gin.Engin
 			appRoutes.GET("/list/:deviceId", handler.ListInstalledAppsHandler)
 			appRoutes.POST("/uninstall/:deviceId", handler.UninstallAppHandler)
 		}
+		logcatRoutes := apiV1.Group("/logcat")
+		{
+			logcatRoutes.POST("/clear/:deviceId", handler.ClearLogcatHandler)
+			logcatRoutes.GET("/download/:deviceId", handler.DownloadLogcatHandler)
+		}
 	}
 	return router // 返回创建并配置好的引擎
 }
