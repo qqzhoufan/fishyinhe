@@ -38,4 +38,56 @@ func ListInstalledAppsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"packages": packages})
 }
 
-// 如果未来要添加卸载功能，可以在这里添加 UninstallAppHandler 等
+// UninstallAppRequest 定义了卸载应用请求的 JSON 结构体
+// 这个结构体必须在这里定义，或者在同一个包的其他 .go 文件中定义并被正确导出（如果首字母大写）
+type UninstallAppRequest struct {
+	PackageName string `json:"packageName" binding:"required"`
+	KeepData    bool   `json:"keepData"` // 可选，是否保留应用数据和缓存 (-k 选项)
+}
+
+// UninstallAppHandler 处理卸载设备上应用的请求
+func UninstallAppHandler(c *gin.Context) {
+	deviceId := c.Param("deviceId")
+	if deviceId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Device ID is required"})
+		return
+	}
+
+	var req UninstallAppRequest // 使用上面定义的结构体
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("UninstallAppHandler: Error binding JSON for device %s: %v", deviceId, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
+		return
+	}
+
+	packageName := req.PackageName
+	if packageName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "packageName in request body is required"})
+		return
+	}
+
+	adbOptions := ""
+	if req.KeepData {
+		adbOptions = "-k" // 保留数据和缓存目录
+	}
+
+	log.Printf("UninstallAppHandler: Request to uninstall package. Device: %s, Package: %s, KeepData: %t", deviceId, packageName, req.KeepData)
+
+	output, err := adb.UninstallPackage(deviceId, packageName, adbOptions)
+	if err != nil {
+		log.Printf("UninstallAppHandler: Failed to uninstall package on device %s, package %s: %v", deviceId, packageName, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":    "Failed to uninstall package",
+			"details":  output,
+			"rawError": err.Error(),
+		})
+		return
+	}
+
+	log.Printf("UninstallAppHandler: Uninstallation process for device %s, package %s, resulted in output: %s", deviceId, packageName, output)
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Uninstallation command executed",
+		"details":     output,
+		"packageName": packageName,
+	})
+}

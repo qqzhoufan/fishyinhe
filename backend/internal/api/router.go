@@ -42,6 +42,7 @@ func SetupRouter() *gin.Engine { // 函数签名：无参数，返回 *gin.Engin
 		appRoutes := apiV1.Group("/apps")
 		{
 			appRoutes.GET("/list/:deviceId", handler.ListInstalledAppsHandler)
+			appRoutes.POST("/uninstall/:deviceId", handler.UninstallAppHandler)
 		}
 	}
 	return router // 返回创建并配置好的引擎

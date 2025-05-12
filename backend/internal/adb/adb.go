@@ -267,3 +267,48 @@ func InstallAPK(deviceId string, localApkPathOnServer string) (string, error) {
 
 	return output, nil
 }
+func UninstallPackage(deviceId string, packageName string, options string) (string, error) {
+	if deviceId == "" || packageName == "" {
+		return "", fmt.Errorf("UninstallPackage: deviceId and packageName cannot be empty")
+	}
+
+	log.Printf("UninstallPackage: Attempting to uninstall package '%s' from device '%s' with options '%s'", packageName, deviceId, options)
+
+	args := []string{"-s", deviceId, "shell", "pm", "uninstall"}
+	if options != "" {
+		args = append(args, options)
+	}
+	args = append(args, packageName)
+
+	cmd := exec.Command("adb", args...)
+	var out bytes.Buffer // pm uninstall 的输出通常在 stdout
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// pm uninstall 成功时返回退出码 0，输出通常包含 "Success"
+	// 失败时，输出和 stderr 中会有错误信息
+	output := strings.TrimSpace(out.String() + "\n" + stderr.String()) // 合并 stdout 和 stderr
+
+	log.Printf("UninstallPackage: 'adb shell pm uninstall' command for device '%s', package '%s' finished.", deviceId, packageName)
+	log.Printf("UninstallPackage: Stdout: [%s]", strings.TrimSpace(out.String()))
+	log.Printf("UninstallPackage: Stderr: [%s]", strings.TrimSpace(stderr.String()))
+	log.Printf("UninstallPackage: Combined output: [%s]", output)
+
+	if err != nil {
+		errMsg := fmt.Sprintf("UninstallPackage: Failed to execute for package '%s' on device '%s': %v. Full Output: %s",
+			packageName, deviceId, err, output)
+		log.Println(errMsg)
+		return output, fmt.Errorf("adb uninstall command execution failed: %v. Output: %s", err, output)
+	}
+
+	log.Printf("UninstallPackage: Uninstallation command executed successfully (cmd.Run returned nil) for package '%s' on device '%s'. Output: %s", packageName, deviceId, output)
+	if !strings.Contains(strings.ToLower(output), "success") {
+		log.Printf("UninstallPackage: Warning - Output for device '%s', package '%s' did not explicitly contain 'success'. Full Output: %s", deviceId, packageName, output)
+		// 可以考虑返回一个特定错误，如果需要前端明确知道卸载是否真的成功
+		// return output, fmt.Errorf("uninstallation did not explicitly report success: %s", output)
+	}
+
+	return output, nil
+}
