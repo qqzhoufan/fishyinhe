@@ -35,6 +35,10 @@ const isInstallingApk = ref(false);
 const apkInstallMessage = ref('');
 const apkInstallError = ref('');
 
+// --- 返回主页功能的状态 ---
+const isSendingGoHome = ref(false);
+const goHomeMessage = ref('');
+
 
 // --- 获取设备列表 ---
 async function fetchDevices() {
@@ -45,7 +49,6 @@ async function fetchDevices() {
   if (isMirroring.value) stopScreenMirroring();
   selectedDeviceId.value = null;
 
-  // 清空所有子功能状态
   fileList.value = [];
   currentRemotePath.value = '/sdcard/';
   fileListError.value = '';
@@ -54,6 +57,7 @@ async function fetchDevices() {
   selectedApkToInstall.value = null;
   apkInstallMessage.value = '';
   apkInstallError.value = '';
+  goHomeMessage.value = '';
 
 
   try {
@@ -77,7 +81,6 @@ function selectDevice(deviceId) {
 
   selectedDeviceId.value = deviceId;
 
-  // 重置文件和APK状态
   fileList.value = [];
   currentRemotePath.value = '/sdcard/';
   fileListError.value = '';
@@ -86,9 +89,36 @@ function selectDevice(deviceId) {
   selectedApkToInstall.value = null;
   apkInstallMessage.value = '';
   apkInstallError.value = '';
+  goHomeMessage.value = '';
 
   if (deviceId) {
     fetchFileList();
+  }
+}
+
+// --- 处理 Canvas 点击事件 (用于远程点击) ---
+function handleCanvasClick(event) {
+  if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN || !screenCanvasRef.value) {
+    return;
+  }
+  const rect = screenCanvasRef.value.getBoundingClientRect();
+  const canvasElement = screenCanvasRef.value;
+  const scaleX = canvasElement.width / rect.width;
+  const scaleY = canvasElement.height / rect.height;
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+
+  console.log(`[handleCanvasClick] Canvas clicked. Raw (offsetX,Y): ${event.offsetX}, ${event.offsetY}. Client(X,Y): ${event.clientX}, ${event.clientY}`);
+  console.log(`[handleCanvasClick] Canvas rect: L=${rect.left.toFixed(0)}, T=${rect.top.toFixed(0)}, W=${rect.width.toFixed(0)}, H=${rect.height.toFixed(0)}`);
+  console.log(`[handleCanvasClick] Canvas buffer: W=${canvasElement.width}, H=${canvasElement.height}`);
+  console.log(`[handleCanvasClick] Calculated tap for device at: x=${x}, y=${y} (scaleX: ${scaleX.toFixed(2)}, scaleY: ${scaleY.toFixed(2)})`);
+
+  if (x >= 0 && x <= canvasElement.width && y >= 0 && y <= canvasElement.height) {
+    const clickData = { type: "input_tap", x: x, y: y };
+    socket.send(JSON.stringify(clickData));
+    console.log('[handleCanvasClick] Sent tap event to backend:', clickData);
+  } else {
+    console.warn('[handleCanvasClick] Click outside canvas drawing buffer dimensions. Tap not sent.');
   }
 }
 
@@ -101,10 +131,15 @@ function startScreenMirroring() {
   socket = new WebSocket(wsUrl);
   socket.binaryType = 'blob';
   isMirroring.value = true;
-  errorMessage.value = ''; // 清空主错误，让镜像特定错误显示
+  errorMessage.value = '';
 
   socket.onopen = () => {
-    if (screenCanvasRef.value) canvasCtx = screenCanvasRef.value.getContext('2d');
+    console.log("[startScreenMirroring] WebSocket connection established.");
+    if (screenCanvasRef.value) {
+      canvasCtx = screenCanvasRef.value.getContext('2d');
+      screenCanvasRef.value.addEventListener('click', handleCanvasClick);
+      console.log("[startScreenMirroring] Click listener added to canvas.");
+    }
   };
   socket.onmessage = async (event) => {
     if (event.data instanceof Blob && canvasCtx && screenCanvasRef.value) {
@@ -117,6 +152,14 @@ function startScreenMirroring() {
         canvasCtx.drawImage(imageBitmap, 0, 0);
         imageBitmap.close();
       } catch (e) { console.error("Canvas draw error:", e); }
+    } else if (typeof event.data === 'string') {
+      console.log("[ScreenMirror] Received text message from WebSocket:", event.data);
+      try {
+        const msgData = JSON.parse(event.data);
+        if (msgData.type === 'error') {
+          errorMessage.value = `屏幕镜像错误: ${msgData.message || '未知错误'}`;
+        }
+      } catch (e) { /* 非JSON文本消息 */ }
     }
   };
   socket.onerror = (error) => {
@@ -124,8 +167,15 @@ function startScreenMirroring() {
     errorMessage.value = "屏幕镜像连接发生错误。";
   };
   socket.onclose = (event) => {
+    console.log("[startScreenMirroring] WebSocket connection closed. Reason:", event.reason, "Code:", event.code);
     isMirroring.value = false;
-    if (canvasCtx && screenCanvasRef.value) canvasCtx.clearRect(0, 0, screenCanvasRef.value.width, screenCanvasRef.value.height);
+    if (screenCanvasRef.value) {
+      screenCanvasRef.value.removeEventListener('click', handleCanvasClick);
+      console.log("[startScreenMirroring] Click listener removed from canvas.");
+      if (canvasCtx) {
+        canvasCtx.clearRect(0, 0, screenCanvasRef.value.width, screenCanvasRef.value.height);
+      }
+    }
     canvasCtx = null;
     socket = null;
     if (event.code !== 1000 && !event.wasClean && !errorMessage.value) {
@@ -133,7 +183,12 @@ function startScreenMirroring() {
     }
   };
 }
-function stopScreenMirroring() { if (socket) socket.close(1000, "User stop"); }
+function stopScreenMirroring() {
+  console.log('[stopScreenMirroring] Attempting to stop mirroring.');
+  if (socket) {
+    socket.close(1000, "User requested stop");
+  }
+}
 
 // --- 文件浏览方法 ---
 async function fetchFileList() {
@@ -142,11 +197,12 @@ async function fetchFileList() {
   fileListError.value = '';
   uploadSuccessMessage.value = '';
   uploadError.value = '';
-  apkInstallMessage.value = ''; // 清空旧的安装消息
+  apkInstallMessage.value = '';
   apkInstallError.value = '';
+  goHomeMessage.value = '';
 
   try {
-    const response = await axios.get(`http://localhost:5679/api/files/list/${selectedDeviceId.value}`, { // 修正API路径
+    const response = await axios.get(`http://localhost:5679/api/files/list/${selectedDeviceId.value}`, {
       params: { path: currentRemotePath.value }
     });
     currentRemotePath.value = response.data.path || currentRemotePath.value;
@@ -182,7 +238,6 @@ async function downloadFile(item) {
   fullRemotePath += item.name;
 
   fileListError.value = `正在准备下载 ${item.name}...`;
-  // 修正API路径
   const downloadUrl = `http://localhost:5679/api/files/download/${selectedDeviceId.value}?filePath=${encodeURIComponent(fullRemotePath)}`;
 
   try {
@@ -268,7 +323,6 @@ async function uploadSelectedFile() {
   formData.append('remoteDirPath', currentRemotePath.value);
   try {
     const response = await axios.post(
-        // 修正API路径
         `http://localhost:5679/api/files/upload/${selectedDeviceId.value}`,
         formData,
         {
@@ -325,7 +379,6 @@ async function installSelectedApk() {
 
   try {
     const response = await axios.post(
-        // 修正API路径
         `http://localhost:5679/api/apk/install/${selectedDeviceId.value}`,
         formData,
         { headers: { 'Content-Type': 'multipart/form-data' } }
@@ -354,6 +407,38 @@ async function installSelectedApk() {
   }
 }
 
+// --- 发送返回主页命令的方法 ---
+async function sendGoHomeCommand() {
+  if (!selectedDeviceId.value) {
+    alert("请先选择一个设备！");
+    return;
+  }
+  isSendingGoHome.value = true;
+  goHomeMessage.value = '正在发送返回主页命令...';
+  apkInstallMessage.value = '';
+  apkInstallError.value = '';
+  uploadSuccessMessage.value = '';
+  uploadError.value = '';
+  fileListError.value = '';
+
+  try {
+    const response = await axios.post(`http://localhost:5679/api/devices/${selectedDeviceId.value}/gohome`);
+    goHomeMessage.value = response.data.message || "返回主页命令已发送。";
+    console.log("Go home command response:", response.data);
+    setTimeout(() => { goHomeMessage.value = ''; }, 3000);
+  } catch (error) {
+    console.error("Error sending go home command:", error);
+    if (error.response && error.response.data && error.response.data.error) {
+      goHomeMessage.value = `错误: ${error.response.data.error} - ${error.response.data.details || ''}`;
+    } else {
+      goHomeMessage.value = "发送返回主页命令失败。";
+    }
+  } finally {
+    isSendingGoHome.value = false;
+  }
+}
+
+
 // --- 生命周期函数 和 watch ---
 onMounted(() => fetchDevices());
 onUnmounted(() => { if (socket) stopScreenMirroring(); });
@@ -381,12 +466,13 @@ watch(selectedDeviceId, (newId, oldId) => {
     <p style="margin:2px 0;">InstallingAPK: {{ isInstallingApk }}</p>
     <p style="margin:2px 0; color: green;">InstallOK: {{ apkInstallMessage || 'N' }}</p>
     <p style="margin:2px 0; color: sienna;">InstallErr: {{ apkInstallError || 'N' }}</p>
+    <p style="margin:2px 0; color: blue;">GoHomeMsg: {{ goHomeMessage || 'N' }}</p>
   </div>
 
   <div class="phone-page">
     <header>
       <h1>手机连接与管理</h1>
-      <button @click="fetchDevices" :disabled="isLoading || isMirroring || isUploadingFile || isInstallingApk" class="refresh-btn">
+      <button @click="fetchDevices" :disabled="isLoading || isMirroring || isUploadingFile || isInstallingApk || isSendingGoHome" class="refresh-btn">
         {{ isLoading ? '刷新中...' : '刷新设备列表' }}
       </button>
     </header>
@@ -416,27 +502,42 @@ watch(selectedDeviceId, (newId, oldId) => {
       <section class="action-section screen-mirror-section">
         <h4>屏幕镜像</h4>
         <div class="mirror-controls">
-          <button @click="startScreenMirroring" :disabled="isMirroring || !selectedDeviceId || isUploadingFile || isInstallingApk" class="control-btn start-btn">开始屏幕镜像</button>
+          <button @click="startScreenMirroring" :disabled="isMirroring || !selectedDeviceId || isUploadingFile || isInstallingApk || isSendingGoHome" class="control-btn start-btn">开始屏幕镜像</button>
           <button @click="stopScreenMirroring" :disabled="!isMirroring" class="control-btn stop-btn">停止屏幕镜像</button>
         </div>
-        <div v-if="isMirroring && errorMessage && !fileListError && !uploadError && !apkInstallError" class="error-section mirror-error">
+        <div v-if="isMirroring && errorMessage && !fileListError && !uploadError && !apkInstallError && !goHomeMessage" class="error-section mirror-error">
           <p class="error-message">{{ errorMessage }}</p>
         </div>
         <div v-if="isMirroring" class="mirror-display-area">
-          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas"></canvas>
+          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击此处可在手机上模拟点击"></canvas>
           <p v-if="!canvasCtx && isMirroring">正在初始化画布...</p>
         </div>
+      </section>
+      <hr class="section-divider">
+
+      <section class="action-section device-controls-section">
+        <h4>设备控制</h4>
+        <button
+            @click="sendGoHomeCommand"
+            class="control-btn go-home-btn"
+            :disabled="isSendingGoHome || !selectedDeviceId || isUploadingFile || isInstallingApk"
+        >
+          {{ isSendingGoHome ? '处理中...' : '返回手机主页' }}
+        </button>
+        <p v-if="goHomeMessage" class="status-message" :class="{'error': goHomeMessage.toLowerCase().includes('错误') || goHomeMessage.toLowerCase().includes('失败')}">
+          {{ goHomeMessage }}
+        </p>
       </section>
       <hr class="section-divider">
 
       <section class="action-section file-browser-section">
         <h4>文件浏览器 & 文件上传</h4>
         <div class="path-navigation">
-          <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径" :disabled="isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" />
-          <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" class="control-btn">
+          <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径" :disabled="isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || !selectedDeviceId" />
+          <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || !selectedDeviceId" class="control-btn">
             {{ isFileListing ? '加载中...' : '转到路径' }}
           </button>
-          <button @click="navigateUp" :disabled="!canNavigateUp || isFileListing || isUploadingFile || isInstallingApk || !selectedDeviceId" class="control-btn up-btn">
+          <button @click="navigateUp" :disabled="!canNavigateUp || isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || !selectedDeviceId" class="control-btn up-btn">
             返回上一级
           </button>
         </div>
@@ -447,9 +548,9 @@ watch(selectedDeviceId, (newId, oldId) => {
               @change="handleFileSelect"
               ref="fileInputRef"
               style="display: none;"
-              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk"
+              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome"
           />
-          <button @click="triggerFileInput" class="control-btn choose-file-btn" :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk">
+          <button @click="triggerFileInput" class="control-btn choose-file-btn" :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome">
             选择文件上传
           </button>
           <span v-if="selectedFileToUpload" class="selected-file-name">
@@ -459,7 +560,7 @@ watch(selectedDeviceId, (newId, oldId) => {
               v-if="selectedFileToUpload"
               @click="uploadSelectedFile"
               class="control-btn upload-btn"
-              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk"
+              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome"
           >
             {{ isUploadingFile ? `上传中... ${uploadProgress}%` : '上传到当前目录' }}
           </button>
@@ -508,9 +609,9 @@ watch(selectedDeviceId, (newId, oldId) => {
               ref="apkFileInputRef"
               style="display: none;"
               accept=".apk"
-              :disabled="isInstallingApk || !selectedDeviceId"
+              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome"
           />
-          <button @click="triggerApkFileInput" class="control-btn choose-file-btn" :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile">
+          <button @click="triggerApkFileInput" class="control-btn choose-file-btn" :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome">
             选择本地 APK 文件
           </button>
           <span v-if="selectedApkToInstall" class="selected-file-name">
@@ -520,7 +621,7 @@ watch(selectedDeviceId, (newId, oldId) => {
               v-if="selectedApkToInstall"
               @click="installSelectedApk"
               class="control-btn install-apk-btn"
-              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile"
+              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome"
           >
             {{ isInstallingApk ? '正在安装...' : '安装选中的 APK' }}
           </button>
@@ -555,14 +656,21 @@ watch(selectedDeviceId, (newId, oldId) => {
 .error-section p.error-message,
 .mirror-error p.error-message,
 .upload-status-message.error-message,
-.install-status-message.error-message {
+.install-status-message.error-message,
+.status-message.error { /* 统一错误消息样式 */
   color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb;
   padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
 }
 .success-message.upload-status-message,
-.success-message.install-status-message {
+.success-message.install-status-message,
+.status-message:not(.error) { /* 统一成功/中性消息样式 */
   color: #155724; background-color: #d4edda; border: 1px solid #c3e6cb;
   padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
+}
+.status-message:not(.error) { /* goHomeMessage 的中性/成功样式 */
+  color: #004085;
+  background-color: #cce5ff;
+  border: 1px solid #b8daff;
 }
 .install-status-message pre {
   white-space: pre-wrap;
@@ -599,6 +707,13 @@ watch(selectedDeviceId, (newId, oldId) => {
 .control-btn { padding: 9px 16px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-size: 0.95em; transition: background-color 0.2s, opacity 0.2s; line-height: 1.5; }
 .control-btn:disabled { opacity: 0.65; cursor: not-allowed; }
 
+/* 设备控制区域 */
+.device-controls-section { text-align: center; }
+.go-home-btn { background-color: #f0ad4e; color: white; }
+.go-home-btn:not(:disabled):hover { background-color: #ec971f; }
+.status-message { margin-top: 10px; font-size: 0.9em; padding: 8px; border-radius: 4px; }
+
+
 /* 屏幕镜像 */
 .screen-mirror-section .mirror-controls { margin-bottom: 20px; text-align: center; }
 .screen-mirror-section .start-btn { background-color: #28a745; color: white; }
@@ -606,7 +721,7 @@ watch(selectedDeviceId, (newId, oldId) => {
 .screen-mirror-section .stop-btn { background-color: #dc3545; color: white; }
 .screen-mirror-section .stop-btn:not(:disabled):hover { background-color: #c82333; }
 .screen-mirror-section .mirror-display-area { margin-top: 15px; padding: 10px; border: 1px dashed #ced4da; min-height: 220px; display: flex; justify-content: center; align-items: center; background-color: #f8f9fa; }
-.screen-mirror-section .mirrored-screen-canvas { max-width: 100%; max-height: 480px; border: 1px solid #dee2e6; display: block; margin: auto; background-color: #000; }
+.screen-mirror-section .mirrored-screen-canvas { max-width: 100%; max-height: 480px; border: 1px solid #dee2e6; display: block; margin: auto; background-color: #000; cursor: pointer; }
 .screen-mirror-section .mirror-display-area p { color: #6c757d; }
 
 /* 文件浏览 */
@@ -626,14 +741,12 @@ watch(selectedDeviceId, (newId, oldId) => {
 .upload-progress-bar-container { width: 100%; background-color: #e9ecef; border-radius: 5px; margin-bottom: 12px; height: 22px; overflow: hidden; }
 .upload-progress-bar { width: 0%; height: 100%; background-color: #007bff; color: white; text-align: center; line-height: 22px; font-size: 0.85em; transition: width 0.3s ease-out; }
 
-/* APK 安装 (重新添加) */
-.apk-installer-section { /* 可以给APK安装部分一个独立的容器 */
-  margin-top: 20px; /* 和文件列表的间距 */
-}
+/* APK 安装 */
+.apk-installer-section { margin-top: 20px; }
 .apk-install-area {
-  margin-bottom: 15px; /* 与状态消息的间距 */
+  margin-bottom: 15px;
   padding: 12px;
-  background-color: #fff9e6; /* 淡黄色背景 */
+  background-color: #fff9e6;
   border: 1px dashed #ffecb3;
   border-radius: 5px;
   display: flex;
@@ -641,21 +754,20 @@ watch(selectedDeviceId, (newId, oldId) => {
   gap: 12px;
   flex-wrap: wrap;
 }
-.apk-install-area .choose-file-btn { /* APK 选择按钮样式 */
-  background-color: #fd7e14; /* Orange */
+.apk-install-area .choose-file-btn {
+  background-color: #fd7e14;
   color: white;
 }
 .apk-install-area .choose-file-btn:not(:disabled):hover {
   background-color: #e67e22;
 }
-.apk-install-area .install-apk-btn { /* APK 安装按钮样式 */
-  background-color: #ffc107; /* Warning Yellow */
+.apk-install-area .install-apk-btn {
+  background-color: #ffc107;
   color: #212529;
 }
 .apk-install-area .install-apk-btn:not(:disabled):hover {
   background-color: #e0a800;
 }
-/* 复用 .selected-file-name 样式 */
 
 /* 文件列表容器 */
 .file-browser-section .file-list-container ul { list-style-type: none; padding: 0; max-height: 380px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 5px; background-color: #ffffff; margin-top: 15px; }
@@ -673,16 +785,3 @@ watch(selectedDeviceId, (newId, oldId) => {
 .navigation a { color: #007bff; text-decoration: none; font-size: 1.05em; }
 .navigation a:hover { text-decoration: underline; }
 </style>
-```
-
-**重要的检查点：**
-
-1.  **后端代码：** 确保您的 Go 后端代码包含了 `internal/adb/adb.go` 中修改后的 `InstallAPK` 函数（接收服务器本地路径），以及 `internal/api/handler/apk_handler.go` 中的 `InstallLocalAPKHandler`，并且 `internal/api/router.go` 中定义了指向它的 `POST /api/apk/install/:deviceId` 路由。
-2.  **重启服务：** 在替换前端代码后，务必重启后端服务 (`myadb.exe`) 和前端开发服务器 (`npm run dev`)。
-3.  **测试流程：**
-* 选择设备。
-* 点击“选择本地 APK 文件”按钮，选择一个 `.apk` 文件。
-* 点击“安装选中的 APK”按钮。
-* 观察界面上的状态消息和浏览器控制台的日志。
-
-希望这次能顺利

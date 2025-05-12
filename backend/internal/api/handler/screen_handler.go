@@ -1,111 +1,160 @@
-// D:\fishyinhe\backend\internal\api\handler\screen_handler.go
 package handler
 
 import (
 	"bytes"
+	"encoding/json" // 新增：用于解析 JSON 消息
 	"log"
 	"net/http"
 	"os/exec"
+	"strconv" // 新增：用于将数字转换为字符串 (如果需要)
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
+// upgrader (保持不变)
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// 允许所有来源的 WebSocket 连接 (在生产环境中你可能需要更严格的检查)
 		return true
 	},
 }
 
-// ScreenMirrorWS 处理屏幕镜像的 WebSocket 请求
+// InputMessage 定义从前端接收的输入事件的结构
+type InputMessage struct {
+	Type string `json:"type"` // 例如 "input_tap"
+	X    int    `json:"x"`
+	Y    int    `json:"y"`
+	// 未来可以扩展其他类型，如 swipe, keyevent 等
+	// KeyCode int `json:"keyCode,omitempty"`
+	// Text string `json:"text,omitempty"`
+}
+
+// ScreenMirrorWS 处理屏幕镜像的 WebSocket 请求，并增加输入处理
 func ScreenMirrorWS(c *gin.Context) {
-	deviceId := c.Param("deviceId") // 从 URL 路径中获取 deviceId
+	deviceId := c.Param("deviceId")
 	if deviceId == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Device ID is required"})
 		return
 	}
 
-	// 将 HTTP 连接升级到 WebSocket 连接
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade to websocket for device %s: %v", deviceId, err)
-		// Upgrade 通常会自己处理错误响应，但如果出错，我们记录日志
-		// c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upgrade to websocket"}) // 这行通常不需要
 		return
 	}
-	defer conn.Close() // 确保连接在使用完毕后关闭
+	defer conn.Close()
+	log.Printf("WebSocket connection established for screen mirroring & input: %s, device: %s", conn.RemoteAddr(), deviceId)
 
-	log.Printf("WebSocket connection established for screen mirroring: %s, device: %s", conn.RemoteAddr(), deviceId)
-
-	// 创建一个 ticker 来控制截图的频率 (例如，每秒10帧 -> 100ms 间隔)
-	// 你可以根据性能调整这个值
-	frameInterval := 100 * time.Millisecond // 10 FPS
-	// frameInterval := 200 * time.Millisecond // 5 FPS
+	frameInterval := 200 * time.Millisecond // 保持之前的帧率设置
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 
-	// 循环处理：读取客户端消息（用于检测断开）和发送屏幕截图
-	// 我们启动一个 goroutine 来读取消息，这样主循环可以专注于发送
-	clientDisconnected := make(chan struct{})
+	// 用于从读取 goroutine 发送错误或断开信号
+	errChan := make(chan error, 1)
+	clientDisconnected := make(chan struct{}) // 用于明确的断开信号
+
+	// Goroutine 用于读取来自客户端的消息 (例如点击事件)
 	go func() {
-		defer close(clientDisconnected) // 当 goroutine 退出时关闭 channel
+		defer func() {
+			log.Printf("Read goroutine for device %s, client %s exiting.", deviceId, conn.RemoteAddr())
+			close(clientDisconnected) // 通知主循环客户端已断开
+		}()
 		for {
-			// 如果客户端发送任何消息或连接关闭，ReadMessage 会返回错误
-			if _, _, err := conn.ReadMessage(); err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			messageType, p, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
 					log.Printf("Client %s (device: %s) disconnected (read error): %v", conn.RemoteAddr(), deviceId, err)
+				} else if err == websocket.ErrCloseSent {
+					log.Printf("Client %s (device: %s) WebSocket closed by server (CloseSent).", conn.RemoteAddr(), deviceId)
 				} else {
-					log.Printf("Client %s (device: %s) WebSocket read error: %v", conn.RemoteAddr(), deviceId, err)
+					log.Printf("Error reading message from client %s (device: %s): %v", conn.RemoteAddr(), deviceId, err)
 				}
-				return // 退出 goroutine，这将触发 clientDisconnected channel 的关闭
+				// 将错误发送到主循环，如果它不是预期的关闭错误
+				// if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				//  errChan <- err // 可能会阻塞，如果主循环已退出
+				// }
+				return // 退出 goroutine
+			}
+
+			if messageType == websocket.TextMessage {
+				var msg InputMessage
+				if err := json.Unmarshal(p, &msg); err != nil {
+					log.Printf("Error unmarshalling JSON from client %s (device: %s): %v. Message: %s", conn.RemoteAddr(), deviceId, err, string(p))
+					continue // 继续读取下一条消息
+				}
+
+				log.Printf("Received message from client %s (device: %s): Type=%s, X=%d, Y=%d", conn.RemoteAddr(), deviceId, msg.Type, msg.X, msg.Y)
+
+				if msg.Type == "input_tap" {
+					// 执行 ADB 点击命令
+					tapCmd := exec.Command("adb", "-s", deviceId, "shell", "input", "tap", strconv.Itoa(msg.X), strconv.Itoa(msg.Y))
+					var tapStderr bytes.Buffer
+					tapCmd.Stderr = &tapStderr
+
+					log.Printf("Executing for device %s: adb shell input tap %d %d", deviceId, msg.X, msg.Y)
+					if err := tapCmd.Run(); err != nil {
+						log.Printf("Error executing input tap for device %s at (%d,%d): %v. Stderr: %s", deviceId, msg.X, msg.Y, err, tapStderr.String())
+						// 可以选择通过 WebSocket 将错误反馈给客户端
+						// errMsg := fmt.Sprintf("{\"type\":\"error\", \"message\":\"Failed to execute tap: %s\"}", tapStderr.String())
+						// if writeErr := conn.WriteMessage(websocket.TextMessage, []byte(errMsg)); writeErr != nil {
+						//     log.Printf("Error sending tap error to client: %v", writeErr)
+						// }
+					} else {
+						log.Printf("Successfully executed input tap for device %s at (%d,%d)", deviceId, msg.X, msg.Y)
+					}
+				}
+				//未来可以处理其他类型的输入事件
+			} else if messageType == websocket.BinaryMessage {
+				log.Printf("Received unexpected binary message from client %s (device: %s)", conn.RemoteAddr(), deviceId)
 			}
 		}
 	}()
 
+	// 主循环，用于发送屏幕截图
 	for {
 		select {
-		case <-ticker.C: // 每当 ticker 触发时
-			// 执行 adb shell screencap -p
-			// -s <deviceId> 指定设备
-			// exec-out 直接将输出流到标准输出，而不是保存到文件再读取
+		case <-ticker.C:
 			cmd := exec.Command("adb", "-s", deviceId, "exec-out", "screencap", "-p")
 			var out bytes.Buffer
 			var stderr bytes.Buffer
 			cmd.Stdout = &out
 			cmd.Stderr = &stderr
-
 			err := cmd.Run()
 			if err != nil {
 				log.Printf("Error running screencap for device %s: %v\nStderr: %s", deviceId, err, stderr.String())
-				// 如果截图失败，可以考虑通知客户端或直接断开
-				// 这里我们暂时只记录日志，并尝试下一次截图
-				continue // 继续下一次 ticker 触发
+				// 如果截图失败，可以考虑通知客户端或断开
+				// errMsg := fmt.Sprintf("{\"type\":\"error\", \"message\":\"Screencap failed: %s\"}", stderr.String())
+				// if writeErr := conn.WriteMessage(websocket.TextMessage, []byte(errMsg)); writeErr != nil {
+				//    log.Printf("Error sending screencap error to client: %v", writeErr)
+				//    // 如果发送错误也失败，可能客户端已断开
+				//    return
+				// }
+				continue
 			}
-
 			pngData := out.Bytes()
 			if len(pngData) == 0 {
 				log.Printf("Screencap for device %s returned empty data.", deviceId)
 				continue
 			}
-
-			// log.Printf("Sending frame for device %s, size: %d bytes", deviceId, len(pngData))
-			// 将 PNG 二进制数据作为 BinaryMessage 发送
 			if err := conn.WriteMessage(websocket.BinaryMessage, pngData); err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
 					log.Printf("Client %s (device: %s) disconnected (write error): %v", conn.RemoteAddr(), deviceId, err)
+				} else if err == websocket.ErrCloseSent {
+					log.Printf("Client %s (device: %s) WebSocket closed by server (write error after CloseSent).", conn.RemoteAddr(), deviceId)
 				} else {
-					log.Printf("Error writing message to client %s (device: %s): %v", conn.RemoteAddr(), deviceId, err)
+					log.Printf("Error writing screen frame to client %s (device: %s): %v", conn.RemoteAddr(), deviceId, err)
 				}
-				return // 写入错误，通常意味着客户端已断开，退出循环
+				return
 			}
-
-		case <-clientDisconnected: // 如果客户端断开连接的 goroutine 退出了
-			log.Printf("Client %s (device: %s) has disconnected. Stopping screen mirror.", conn.RemoteAddr(), deviceId)
-			return // 退出主循环
+		case <-clientDisconnected: // 如果读取 goroutine 检测到断开
+			log.Printf("Client %s (device: %s) has disconnected (signaled by read goroutine). Stopping screen mirror.", conn.RemoteAddr(), deviceId)
+			return
+		case err := <-errChan: // 如果读取 goroutine 报告了错误（虽然目前没用这个）
+			log.Printf("Error from read goroutine for client %s (device: %s): %v. Closing connection.", conn.RemoteAddr(), deviceId, err)
+			return
 		}
 	}
 }

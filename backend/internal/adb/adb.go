@@ -35,9 +35,8 @@ func ListConnectedDevices() ([]DeviceInfo, error) {
 	var devices []DeviceInfo
 	scanner := bufio.NewScanner(strings.NewReader(out.String()))
 
-	// 跳过第一行 "List of devices attached"
 	if scanner.Scan() {
-		// log.Println("Skipped line:", scanner.Text())
+		// 跳过第一行 "List of devices attached"
 	}
 
 	for scanner.Scan() {
@@ -45,7 +44,7 @@ func ListConnectedDevices() ([]DeviceInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Fields(line) // 使用 Fields 来分割，可以处理多个制表符或空格
+		parts := strings.Fields(line)
 		if len(parts) == 2 {
 			devices = append(devices, DeviceInfo{ID: parts[0], Status: parts[1]})
 		}
@@ -55,7 +54,6 @@ func ListConnectedDevices() ([]DeviceInfo, error) {
 		log.Printf("Error scanning adb output: %v", err)
 		return nil, err
 	}
-
 	return devices, nil
 }
 
@@ -63,18 +61,13 @@ func ListConnectedDevices() ([]DeviceInfo, error) {
 type AdbFileItem struct {
 	Name  string `json:"name"`
 	IsDir bool   `json:"isDir"`
-	// 未来可以添加更多信息，如大小、权限、修改日期等，但需要更复杂的ls参数和解析
 }
 
 // ListFiles 执行 "adb -s <deviceId> shell ls -p <path>" 并解析输出
 func ListFiles(deviceId string, remotePath string) ([]AdbFileItem, error) {
 	if remotePath == "" {
-		remotePath = "/" // 默认为根目录，或者你可以选择 /sdcard/
+		remotePath = "/"
 	}
-
-	// 使用 -p 参数会在目录名后附加斜杠
-	// 使用 -A 参数可以包含隐藏文件 (以 . 开头的文件)，如果需要的话
-	// cmd := exec.Command("adb", "-s", deviceId, "shell", "ls", "-Ap", remotePath)
 	cmd := exec.Command("adb", "-s", deviceId, "shell", "ls", "-p", remotePath)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -83,96 +76,60 @@ func ListFiles(deviceId string, remotePath string) ([]AdbFileItem, error) {
 
 	err := cmd.Run()
 	if err != nil {
-		// adb shell ls 在目录为空或不存在时，有时会返回非0退出码，但stderr可能包含有用信息或为空
-		// 所以我们不直接返回错误，而是先尝试解析输出，除非stderr明确指示了严重错误
-		// 例如，如果路径不存在，stderr 可能会有 "No such file or directory"
-		// 如果只是空目录，stdout 会是空的，但 stderr 可能也为空，命令也可能成功
 		log.Printf("Warning/Error running adb ls for device %s, path %s: %v\nStdout: %s\nStderr: %s",
 			deviceId, remotePath, err, out.String(), stderr.String())
-		// 即使有错误，也尝试解析可能的输出，因为某些adb ls版本在空目录时可能返回错误码
 	}
-
-	// 检查 stderr 是否包含明确的错误信息，如 "No such file or directory"
-	// 这是一个简单的检查，实际情况可能更复杂
-	if strings.Contains(stderr.String(), "No such file or directory") {
-		// 我们可以选择返回一个特定的错误类型或nil, nil让调用者知道路径无效
-		// 为了简单，我们这里返回错误
-		return nil, &exec.ExitError{Stderr: stderr.Bytes()} // 返回包含 stderr 的错误
+	if strings.Contains(stderr.String(), "No such file or directory") || strings.Contains(stderr.String(), "Not a directory") {
+		return nil, fmt.Errorf("path not found or not a directory: %s", stderr.String())
 	}
 
 	var files []AdbFileItem
 	scanner := bufio.NewScanner(strings.NewReader(out.String()))
-
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || line == "." || line == ".." { // 忽略空行和 . 及 ..
+		if line == "" || line == "." || line == ".." {
 			continue
 		}
-
 		isDir := strings.HasSuffix(line, "/")
 		name := line
 		if isDir {
 			name = strings.TrimSuffix(line, "/")
 		}
-
-		// 对于某些系统，ls -p 可能会在符号链接目录后也加 /
-		// 更复杂的解析可能需要 ls -l 等来区分
 		files = append(files, AdbFileItem{Name: name, IsDir: isDir})
 	}
-
 	if err := scanner.Err(); err != nil {
 		log.Printf("Error scanning adb ls output for device %s, path %s: %v", deviceId, remotePath, err)
 		return nil, err
 	}
-
 	return files, nil
 }
 
+// PullFile 将指定设备上的远程文件拉取到服务器的本地临时目录
 func PullFile(deviceId string, remoteFilePath string, localTempBaseDir string) (string, error) {
 	if deviceId == "" || remoteFilePath == "" {
 		return "", fmt.Errorf("device ID and remote file path cannot be empty")
 	}
-
-	// 创建一个唯一的本地临时文件名
-	// localFileName := filepath.Base(remoteFilePath) // 使用原始文件名
-	// 为了避免冲突和处理特殊字符，可以生成一个唯一ID作为文件名，或确保localFileName是安全的
-	// 这里我们先简单地在临时目录下创建子目录来存放，以deviceId区分
-
-	// 确保基础临时目录存在
 	if err := os.MkdirAll(localTempBaseDir, 0755); err != nil {
 		log.Printf("Failed to create temp base directory %s: %v", localTempBaseDir, err)
 		return "", err
 	}
-
-	// 为本次操作创建一个临时文件，避免直接使用原始文件名（可能包含非法字符）
-	// 更简单的方式是让 `adb pull` 直接拉取到指定目录，它会使用原始文件名
-	// 我们需要一个临时目标路径，让 adb pull 自动创建文件
-	// 例如，localTempBaseDir/original_filename.ext
-	// 为了确保唯一性，我们可以创建一个临时文件然后获取其名称，或者直接指定目标路径
-
-	// 构建本地目标路径，直接使用文件名
 	localFileName := filepath.Base(remoteFilePath)
 	localFilePath := filepath.Join(localTempBaseDir, localFileName)
 
 	log.Printf("Attempting to pull '%s' from device '%s' to '%s'", remoteFilePath, deviceId, localFilePath)
-
-	// adb pull "remote_path" "local_path"
 	cmd := exec.Command("adb", "-s", deviceId, "pull", remoteFilePath, localFilePath)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-
 	err := cmd.Run()
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to pull file '%s' from device '%s': %v. Stderr: %s",
 			remoteFilePath, deviceId, err, stderr.String())
 		log.Println(errMsg)
-		// 如果本地文件已部分创建，尝试删除它
 		if _, statErr := os.Stat(localFilePath); statErr == nil {
 			os.Remove(localFilePath)
 		}
 		return "", fmt.Errorf(errMsg)
 	}
-
 	log.Printf("Successfully pulled '%s' to '%s'", remoteFilePath, localFilePath)
 	return localFilePath, nil
 }
@@ -182,27 +139,88 @@ func PushFile(deviceId string, localFilePath string, remoteDevicePath string) er
 	if deviceId == "" || localFilePath == "" || remoteDevicePath == "" {
 		return fmt.Errorf("PushFile: deviceId, localFilePath, and remoteDevicePath cannot be empty. Got: D='%s', L='%s', R='%s'", deviceId, localFilePath, remoteDevicePath)
 	}
-
-	log.Printf("Attempting to push '%s' (local) to device '%s' at '%s'", localFilePath, deviceId, remoteDevicePath)
-
-	// adb -s <deviceId> push "<localFilePath>" "<remoteDevicePath>"
-	// 确保路径被正确引用，特别是包含空格的路径
+	log.Printf("PushFile: Attempting to push local file '%s' to device '%s' at remote path '%s'", localFilePath, deviceId, remoteDevicePath)
 	cmd := exec.Command("adb", "-s", deviceId, "push", localFilePath, remoteDevicePath)
+	var out bytes.Buffer
 	var stderr bytes.Buffer
+	cmd.Stdout = &out
 	cmd.Stderr = &stderr
-
 	err := cmd.Run()
+	log.Printf("PushFile: 'adb push' command for device '%s' finished.", deviceId)
+	log.Printf("PushFile: Stdout: [%s]", strings.TrimSpace(out.String()))
+	log.Printf("PushFile: Stderr: [%s]", strings.TrimSpace(stderr.String()))
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to push file '%s' to device '%s' at '%s': %v. Stderr: %s",
-			localFilePath, deviceId, remoteDevicePath, err, stderr.String())
+		errMsg := fmt.Sprintf("PushFile: Failed to push file '%s' to device '%s' at '%s'. Error: %v. Combined Output (Stdout+Stderr): [%s %s]",
+			localFilePath, deviceId, remoteDevicePath, err, strings.TrimSpace(out.String()), strings.TrimSpace(stderr.String()))
 		log.Println(errMsg)
-		return fmt.Errorf(errMsg)
+		return fmt.Errorf("adb push command failed. Stderr: %s", strings.TrimSpace(stderr.String()))
 	}
-
-	log.Printf("Successfully pushed '%s' to device '%s' at '%s'", localFilePath, deviceId, remoteDevicePath)
+	log.Printf("PushFile: Successfully pushed '%s' to device '%s' at '%s'", localFilePath, deviceId, remoteDevicePath)
 	return nil
 }
 
+// GoToHomeScreen 在指定设备上模拟按下 Home 键
+func GoToHomeScreen(deviceId string) error {
+	if deviceId == "" {
+		return fmt.Errorf("GoToHomeScreen: deviceId cannot be empty")
+	}
+	log.Printf("GoToHomeScreen: Attempting to send HOME keyevent to device '%s'", deviceId)
+	cmd := exec.Command("adb", "-s", deviceId, "shell", "input", "keyevent", "KEYCODE_HOME")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		errMsg := fmt.Sprintf("GoToHomeScreen: Failed for device '%s': %v. Stderr: %s",
+			deviceId, err, stderr.String())
+		log.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+	log.Printf("GoToHomeScreen: Successfully sent HOME keyevent to device '%s'", deviceId)
+	return nil
+}
+
+// ListInstalledPackages 获取设备上已安装的应用包名列表
+func ListInstalledPackages(deviceId string, options string) ([]string, error) {
+	if deviceId == "" {
+		return nil, fmt.Errorf("ListInstalledPackages: deviceId cannot be empty")
+	}
+	log.Printf("ListInstalledPackages: Attempting to list packages on device '%s' with options '%s'", deviceId, options)
+	args := []string{"-s", deviceId, "shell", "pm", "list", "packages"}
+	if options != "" {
+		args = append(args, options)
+	}
+	cmd := exec.Command("adb", args...)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		errMsg := fmt.Sprintf("ListInstalledPackages: Failed for device '%s': %v. Stderr: %s",
+			deviceId, err, stderr.String())
+		log.Println(errMsg)
+		return nil, fmt.Errorf(errMsg)
+	}
+	var packages []string
+	scanner := bufio.NewScanner(strings.NewReader(out.String()))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "package:") {
+			packageName := strings.TrimPrefix(line, "package:")
+			packages = append(packages, packageName)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("ListInstalledPackages: Error scanning pm list packages output: %v", err)
+		return nil, err
+	}
+	log.Printf("ListInstalledPackages: Found %d packages on device '%s'", len(packages), deviceId)
+	return packages, nil
+}
+
+// InstallAPK 使用 adb install 命令从服务器本地路径安装 APK 到指定设备
+// localApkPathOnServer 是 APK 文件在运行 Go 后端的服务器上的完整路径
+// 返回 ADB 命令的输出
 func InstallAPK(deviceId string, localApkPathOnServer string) (string, error) {
 	if deviceId == "" || localApkPathOnServer == "" {
 		return "", fmt.Errorf("InstallAPK: deviceId and localApkPathOnServer cannot be empty")
@@ -217,9 +235,9 @@ func InstallAPK(deviceId string, localApkPathOnServer string) (string, error) {
 	// 打印将要执行的命令的准确形式
 	log.Printf("InstallAPK: Preparing to execute: adb -s \"%s\" install -r -g \"%s\"", deviceId, localApkPathOnServer)
 
-	// 构建命令: adb -s <deviceId> install -r -g <localApkPathOnServer>
+	// *** 修正：使用 adb install <local_path> 而不是 adb shell pm install <local_path> ***
 	cmd := exec.Command("adb", "-s", deviceId, "install", "-r", "-g", localApkPathOnServer)
-	var out bytes.Buffer // adb install 的输出通常在 stdout
+	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -227,25 +245,24 @@ func InstallAPK(deviceId string, localApkPathOnServer string) (string, error) {
 	err := cmd.Run()
 	output := strings.TrimSpace(out.String() + "\n" + stderr.String()) // 合并 stdout 和 stderr
 
-	log.Printf("InstallAPK: 'adb install' command for device '%s', APK '%s' finished.", deviceId, filepath.Base(localApkPathOnServer))
+	log.Printf("InstallAPK: 'adb install' command for device '%s', APK from server path '%s' finished.", deviceId, localApkPathOnServer)
 	log.Printf("InstallAPK: Stdout: [%s]", strings.TrimSpace(out.String()))
 	log.Printf("InstallAPK: Stderr: [%s]", strings.TrimSpace(stderr.String()))
 	log.Printf("InstallAPK: Combined output: [%s]", output)
 
 	if err != nil {
-		errMsg := fmt.Sprintf("InstallAPK: Failed to execute adb install for APK '%s' on device '%s': %v. Full Output: %s",
+		errMsg := fmt.Sprintf("InstallAPK: Failed to execute adb install for APK from server path '%s' on device '%s': %v. Full Output: %s",
 			localApkPathOnServer, deviceId, err, output)
 		log.Println(errMsg)
-		// 注意：即使 cmd.Run() 返回错误，output 也可能包含有用的 ADB 错误信息
+		// 即使 cmd.Run() 返回错误，output 也可能包含有用的 ADB 错误信息
+		// 这里的错误 "failed to write; ... (No such file or directory)" 是 adb.exe 自己的错误，表明它找不到本地文件
 		return output, fmt.Errorf("adb install command execution failed: %v. Output: %s", err, output)
 	}
 
-	log.Printf("InstallAPK: APK installation command executed successfully (cmd.Run returned nil) for '%s' on device '%s'. Output: %s", filepath.Base(localApkPathOnServer), deviceId, output)
+	log.Printf("InstallAPK: APK installation command executed successfully (cmd.Run returned nil) for server APK '%s' on device '%s'. Output: %s", filepath.Base(localApkPathOnServer), deviceId, output)
 	// 检查输出是否明确包含 "Success"
 	if !strings.Contains(strings.ToLower(output), "success") {
-		log.Printf("InstallAPK: Warning - Output for device '%s', APK '%s' did not explicitly contain 'success'. Full Output: %s", deviceId, filepath.Base(localApkPathOnServer), output)
-		// 可以考虑返回一个特定错误，如果需要前端明确知道安装是否真的成功
-		// return output, fmt.Errorf("installation did not report success: %s", output)
+		log.Printf("InstallAPK: Warning - Output for device '%s', server APK '%s' did not explicitly contain 'success'. Full Output: %s", deviceId, filepath.Base(localApkPathOnServer), output)
 	}
 
 	return output, nil
