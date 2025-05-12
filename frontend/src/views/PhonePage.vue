@@ -13,6 +13,9 @@ const isMirroring = ref(false);
 const screenCanvasRef = ref(null);
 let socket = null;
 let canvasCtx = null;
+const isDraggingOnCanvas = ref(false); // 新增：标记是否正在canvas上拖拽
+const dragStartX = ref(0); // 新增：拖拽起始X坐标
+const dragStartY = ref(0); // 新增：拖拽起始Y坐标
 
 // --- 文件浏览相关状态 ---
 const currentRemotePath = ref('/sdcard/');
@@ -52,7 +55,7 @@ const remoteInputText = ref('');
 const isSendingText = ref(false);
 const remoteInputStatus = ref('');
 
-// --- 新增：Logcat 管理相关状态 ---
+// --- Logcat 管理相关状态 ---
 const isClearingLogcat = ref(false);
 const clearLogcatMessage = ref('');
 const isDownloadingLogcat = ref(false);
@@ -67,16 +70,14 @@ async function fetchDevices() {
   if (isMirroring.value) stopScreenMirroring();
   selectedDeviceId.value = null;
 
-  // 清空所有子功能状态
   fileList.value = []; currentRemotePath.value = '/sdcard/'; fileListError.value = '';
   uploadError.value = ''; uploadSuccessMessage.value = ''; selectedFileToUpload.value = null;
   selectedApkToInstall.value = null; apkInstallMessage.value = ''; apkInstallError.value = '';
   goHomeMessage.value = '';
   installedApps.value = []; isLoadingApps.value = false; appsListError.value = ''; uninstallStatusMessage.value = '';
   remoteInputText.value = ''; remoteInputStatus.value = '';
-  isClearingLogcat.value = false; clearLogcatMessage.value = ''; // 清空Logcat状态
-  isDownloadingLogcat.value = false; downloadLogcatMessage.value = ''; // 清空Logcat状态
-
+  isClearingLogcat.value = false; clearLogcatMessage.value = '';
+  isDownloadingLogcat.value = false; downloadLogcatMessage.value = '';
 
   try {
     const response = await axios.get('http://localhost:5679/api/devices');
@@ -94,7 +95,6 @@ function selectDevice(deviceId) {
   if (isMirroring.value) stopScreenMirroring();
   selectedDeviceId.value = deviceId;
 
-  // 重置所有子功能状态
   fileList.value = []; currentRemotePath.value = '/sdcard/'; fileListError.value = '';
   uploadError.value = ''; uploadSuccessMessage.value = ''; selectedFileToUpload.value = null;
   selectedApkToInstall.value = null; apkInstallMessage.value = ''; apkInstallError.value = '';
@@ -104,25 +104,79 @@ function selectDevice(deviceId) {
   isClearingLogcat.value = false; clearLogcatMessage.value = '';
   isDownloadingLogcat.value = false; downloadLogcatMessage.value = '';
 
-  if (deviceId) {
-    fetchFileList();
-    // fetchInstalledApps(); 
-  }
+  if (deviceId) fetchFileList();
 }
 
-// --- 处理 Canvas 点击事件 (用于远程点击) ---
-function handleCanvasClick(event) {
-  if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN || !screenCanvasRef.value) return;
-  const rect = screenCanvasRef.value.getBoundingClientRect();
-  const canvasElement = screenCanvasRef.value;
+// --- 坐标转换辅助函数 ---
+function getCanvasCoordinates(event, canvasElement) {
+  const rect = canvasElement.getBoundingClientRect();
   const scaleX = canvasElement.width / rect.width;
   const scaleY = canvasElement.height / rect.height;
   const x = Math.round((event.clientX - rect.left) * scaleX);
   const y = Math.round((event.clientY - rect.top) * scaleY);
-  if (x >= 0 && x <= canvasElement.width && y >= 0 && y <= canvasElement.height) {
-    const clickData = { type: "input_tap", x: x, y: y };
-    socket.send(JSON.stringify(clickData));
+  return { x, y, scaleX, scaleY, rect };
+}
+
+
+// --- 处理 Canvas 点击/触摸事件 ---
+function handleCanvasPointerDown(event) {
+  if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN || !screenCanvasRef.value) return;
+  event.preventDefault(); // 防止默认行为，如拖拽图片
+
+  const { x, y } = getCanvasCoordinates(event.touches ? event.touches[0] : event, screenCanvasRef.value);
+  isDraggingOnCanvas.value = true;
+  dragStartX.value = x;
+  dragStartY.value = y;
+  console.log(`[CanvasPointerDown] Start: x=${dragStartX.value}, y=${dragStartY.value}`);
+}
+
+function handleCanvasPointerUp(event) {
+  if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN || !screenCanvasRef.value || !isDraggingOnCanvas.value) {
+    isDraggingOnCanvas.value = false; // 确保重置
+    return;
   }
+  event.preventDefault();
+
+  const { x: endX, y: endY } = getCanvasCoordinates(event.changedTouches ? event.changedTouches[0] : event, screenCanvasRef.value);
+  isDraggingOnCanvas.value = false;
+  console.log(`[CanvasPointerUp] End: x=${endX}, y=${endY}`);
+
+  const deltaX = endX - dragStartX.value;
+  const deltaY = endY - dragStartY.value;
+  const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+  const swipeThreshold = 10; // 像素阈值，小于此值认为是点击
+  const tapDurationThreshold = 200; // ms, 按下和抬起之间的时间，用于区分点击和长按/滑动
+
+  // 简单实现：如果位移很小，则认为是点击；否则认为是滑动
+  // 注意：event.timeStamp 可能需要更复杂的逻辑来判断按下时长
+
+  if (distance < swipeThreshold) { // 认为是点击
+    if (dragStartX.value >= 0 && dragStartX.value <= screenCanvasRef.value.width &&
+        dragStartY.value >= 0 && dragStartY.value <= screenCanvasRef.value.height) {
+      const clickData = { type: "input_tap", x: dragStartX.value, y: dragStartY.value };
+      socket.send(JSON.stringify(clickData));
+      console.log('[handleCanvasPointerUp] Sent tap event to backend:', clickData);
+    }
+  } else { // 认为是滑动
+    if (dragStartX.value >= 0 && dragStartX.value <= screenCanvasRef.value.width &&
+        dragStartY.value >= 0 && dragStartY.value <= screenCanvasRef.value.height &&
+        endX >=0 && endX <= screenCanvasRef.value.width &&
+        endY >=0 && endY <= screenCanvasRef.value.height
+    ) {
+      const swipeData = {
+        type: "input_swipe",
+        x1: dragStartX.value,
+        y1: dragStartY.value,
+        x2: endX,
+        y2: endY,
+        duration: 300, // ms, 可以调整或让用户设置
+      };
+      socket.send(JSON.stringify(swipeData));
+      console.log('[handleCanvasPointerUp] Sent swipe event to backend:', swipeData);
+    }
+  }
+  dragStartX.value = 0;
+  dragStartY.value = 0;
 }
 
 // --- 屏幕镜像方法 ---
@@ -137,9 +191,14 @@ function startScreenMirroring() {
   remoteInputStatus.value = '';
 
   socket.onopen = () => {
+    console.log("[startScreenMirroring] WebSocket connection established.");
     if (screenCanvasRef.value) {
       canvasCtx = screenCanvasRef.value.getContext('2d');
-      screenCanvasRef.value.addEventListener('click', handleCanvasClick);
+      // 添加 pointer 事件监听器 (同时处理鼠标和触摸)
+      screenCanvasRef.value.addEventListener('pointerdown', handleCanvasPointerDown);
+      screenCanvasRef.value.addEventListener('pointerup', handleCanvasPointerUp);
+      // screenCanvasRef.value.addEventListener('pointermove', handleCanvasPointerMove); // 如果需要拖拽过程
+      console.log("[startScreenMirroring] Pointer listeners added to canvas.");
     }
   };
   socket.onmessage = async (event) => {
@@ -159,6 +218,8 @@ function startScreenMirroring() {
         if (msgData.type === 'error') remoteInputStatus.value = `屏幕镜像错误: ${msgData.message || '未知错误'}`;
         else if (msgData.type === 'input_text_ack') remoteInputStatus.value = `文本已发送到设备: "${msgData.text}"`;
         else if (msgData.type === 'input_keyevent_ack') remoteInputStatus.value = `按键 ${msgData.keycode} 已发送到设备。`;
+        else if (msgData.type === 'input_swipe_ack') remoteInputStatus.value = `滑动操作已发送。`;
+        else if (msgData.type === 'input_tap_ack') remoteInputStatus.value = `点击操作已发送。`;
       } catch (e) { remoteInputStatus.value = `收到未知文本消息: ${event.data}`; }
     }
   };
@@ -166,7 +227,10 @@ function startScreenMirroring() {
   socket.onclose = (event) => {
     isMirroring.value = false;
     if (screenCanvasRef.value) {
-      screenCanvasRef.value.removeEventListener('click', handleCanvasClick);
+      screenCanvasRef.value.removeEventListener('pointerdown', handleCanvasPointerDown);
+      screenCanvasRef.value.removeEventListener('pointerup', handleCanvasPointerUp);
+      // screenCanvasRef.value.removeEventListener('pointermove', handleCanvasPointerMove);
+      console.log("[startScreenMirroring] Pointer listeners removed from canvas.");
       if (canvasCtx) canvasCtx.clearRect(0, 0, screenCanvasRef.value.width, screenCanvasRef.value.height);
     }
     canvasCtx = null; socket = null;
@@ -174,7 +238,12 @@ function startScreenMirroring() {
     if (!errorMessage.value) remoteInputStatus.value = '屏幕镜像已断开。';
   };
 }
-function stopScreenMirroring() { if (socket) socket.close(1000, "User stop"); }
+function stopScreenMirroring() {
+  console.log('[stopScreenMirroring] Attempting to stop mirroring.');
+  if (socket) {
+    socket.close(1000, "User requested stop");
+  }
+}
 
 // --- 文件浏览方法 ---
 async function fetchFileList() {
@@ -183,7 +252,7 @@ async function fetchFileList() {
   fileListError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
   apkInstallMessage.value = ''; apkInstallError.value = ''; goHomeMessage.value = '';
   appsListError.value = ''; uninstallStatusMessage.value = ''; remoteInputStatus.value = '';
-  clearLogcatMessage.value = ''; downloadLogcatMessage.value = ''; // 清空Logcat消息
+  clearLogcatMessage.value = ''; downloadLogcatMessage.value = '';
 
   try {
     const response = await axios.get(`http://localhost:5679/api/files/list/${selectedDeviceId.value}`, {
@@ -426,72 +495,52 @@ function sendRemoteEnterKey() {
   setTimeout(() => { if(remoteInputStatus.value === '回车键已发送') remoteInputStatus.value = ''; }, 2000);
 }
 
-// --- 新增：Logcat 管理方法 ---
+// --- Logcat 管理方法 ---
 async function clearDeviceLogcat() {
   if (!selectedDeviceId.value) {
-    clearLogcatMessage.value = "错误：请先选择一个设备。";
-    return;
+    clearLogcatMessage.value = "错误：请先选择一个设备。"; return;
   }
   isClearingLogcat.value = true;
   clearLogcatMessage.value = "正在清除 Logcat 缓存...";
   apkInstallMessage.value = ''; apkInstallError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
   fileListError.value = ''; goHomeMessage.value = ''; remoteInputStatus.value = ''; appsListError.value = ''; uninstallStatusMessage.value = '';
   downloadLogcatMessage.value = '';
-
   try {
     const response = await axios.post(`http://localhost:5679/api/logcat/clear/${selectedDeviceId.value}`);
     clearLogcatMessage.value = response.data.message || "Logcat 缓存已清除。";
   } catch (error) {
-    console.error("Error clearing logcat:", error);
     clearLogcatMessage.value = `清除 Logcat 失败: ${error.response?.data?.error || error.message}`;
   } finally {
     isClearingLogcat.value = false;
     setTimeout(() => { clearLogcatMessage.value = ''; }, 3000);
   }
 }
-
 async function downloadDeviceLogcat() {
   if (!selectedDeviceId.value) {
-    downloadLogcatMessage.value = "错误：请先选择一个设备。";
-    return;
+    downloadLogcatMessage.value = "错误：请先选择一个设备。"; return;
   }
   isDownloadingLogcat.value = true;
   downloadLogcatMessage.value = "正在准备下载 Logcat 文件...";
   apkInstallMessage.value = ''; apkInstallError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
   fileListError.value = ''; goHomeMessage.value = ''; remoteInputStatus.value = ''; appsListError.value = ''; uninstallStatusMessage.value = '';
   clearLogcatMessage.value = '';
-
   const downloadUrl = `http://localhost:5679/api/logcat/download/${selectedDeviceId.value}`;
   try {
-    const response = await axios({
-      url: downloadUrl,
-      method: 'GET',
-      responseType: 'blob', // 期望接收文件数据
-    });
-
-    // 从 Content-Disposition 头获取文件名 (如果后端设置了)
-    // 否则，构造一个默认文件名
+    const response = await axios({ url: downloadUrl, method: 'GET', responseType: 'blob' });
     let filename = `logcat_${selectedDeviceId.value.replace(/:/g, '_')}_${new Date().toISOString().slice(0,19).replace(/[-T:]/g,"")}.txt`;
     const disposition = response.headers['content-disposition'];
     if (disposition && disposition.indexOf('attachment') !== -1) {
       const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
       const matches = filenameRegex.exec(disposition);
-      if (matches != null && matches[1]) {
-        filename = matches[1].replace(/['"]/g, '');
-      }
+      if (matches != null && matches[1]) filename = matches[1].replace(/['"]/g, '');
     }
-
     const href = URL.createObjectURL(response.data);
     const link = document.createElement('a');
-    link.href = href;
-    link.setAttribute('download', filename);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(href);
+    link.href = href; link.setAttribute('download', filename);
+    document.body.appendChild(link); link.click();
+    document.body.removeChild(link); URL.revokeObjectURL(href);
     downloadLogcatMessage.value = `Logcat 文件 "${filename}" 下载已开始。`;
   } catch (error) {
-    console.error("Error downloading logcat:", error);
     let errorMsg = "下载 Logcat 文件失败: ";
     if (error.response) {
       if (error.response.data instanceof Blob && error.response.data.type === "application/json") {
@@ -505,15 +554,12 @@ async function downloadDeviceLogcat() {
       } else {
         errorMsg += `${error.response.status} - ${error.response.statusText || '服务器错误'}`;
       }
-    } else if (error.request) {
-      errorMsg += "网络错误或无法连接到服务器。";
-    } else {
-      errorMsg += error.message;
-    }
+    } else if (error.request) { errorMsg += "网络错误或无法连接到服务器。"; }
+    else { errorMsg += error.message; }
     downloadLogcatMessage.value = errorMsg;
   } finally {
     isDownloadingLogcat.value = false;
-    setTimeout(() => { downloadLogcatMessage.value = ''; }, 5000); // 错误消息显示时间长一点
+    setTimeout(() => { downloadLogcatMessage.value = ''; }, 5000);
   }
 }
 
@@ -526,7 +572,6 @@ watch(selectedDeviceId, (newId, oldId) => {
     stopScreenMirroring();
   }
   if (newId !== oldId) {
-    // 清空所有特定于设备的状态
     installedApps.value = []; appsListError.value = ''; uninstallStatusMessage.value = '';
     remoteInputText.value = ''; remoteInputStatus.value = '';
     clearLogcatMessage.value = ''; downloadLogcatMessage.value = '';
@@ -613,8 +658,7 @@ watch(selectedDeviceId, (newId, oldId) => {
           <p class="error-message">{{ errorMessage }}</p>
         </div>
         <div v-if="isMirroring" class="mirror-display-area">
-          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击此处可在手机上模拟点击"></canvas>
-          <p v-if="!canvasCtx && isMirroring">正在初始化画布...</p>
+          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击或拖拽此处可在手机上模拟操作"></canvas> <p v-if="!canvasCtx && isMirroring">正在初始化画布...</p>
         </div>
       </section>
 
@@ -625,7 +669,7 @@ watch(selectedDeviceId, (newId, oldId) => {
         <button
             @click="sendGoHomeCommand"
             class="control-btn go-home-btn"
-            :disabled="isSendingGoHome || !selectedDeviceId || isMirroring || isUploadingFile || isInstallingApk || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+            :disabled="isSendingGoHome || !selectedDeviceId || isUploadingFile || isInstallingApk || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
         >
           {{ isSendingGoHome ? '处理中...' : '返回手机主页' }}
         </button>
@@ -791,14 +835,14 @@ watch(selectedDeviceId, (newId, oldId) => {
           <button
               @click="clearDeviceLogcat"
               class="control-btn clear-logcat-btn"
-              :disabled="isClearingLogcat || !selectedDeviceId || isDownloadingLogcat"
+              :disabled="isClearingLogcat || !selectedDeviceId || isDownloadingLogcat || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText"
           >
             {{ isClearingLogcat ? '清除中...' : '清除 Logcat 缓存' }}
           </button>
           <button
               @click="downloadDeviceLogcat"
               class="control-btn download-logcat-btn"
-              :disabled="isDownloadingLogcat || !selectedDeviceId || isClearingLogcat"
+              :disabled="isDownloadingLogcat || !selectedDeviceId || isClearingLogcat || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText"
           >
             {{ isDownloadingLogcat ? '准备下载...' : '下载当前 Logcat' }}
           </button>
@@ -1076,7 +1120,7 @@ watch(selectedDeviceId, (newId, oldId) => {
   margin-top: 10px;
 }
 
-/* 新增：Logcat 管理部分样式 */
+/* Logcat 管理部分样式 */
 .logcat-management-section {
   /* 与其他 action-section 类似 */
 }
@@ -1085,23 +1129,23 @@ watch(selectedDeviceId, (newId, oldId) => {
   gap: 10px;
   margin-bottom: 10px;
   flex-wrap: wrap;
-  justify-content: center; /* 按钮居中 */
+  justify-content: center;
 }
 .clear-logcat-btn {
-  background-color: #6c757d; /* Secondary Gray */
+  background-color: #6c757d;
   color: white;
 }
 .clear-logcat-btn:not(:disabled):hover {
   background-color: #5a6268;
 }
 .download-logcat-btn {
-  background-color: #17a2b8; /* Info Blue */
+  background-color: #17a2b8;
   color: white;
 }
 .download-logcat-btn:not(:disabled):hover {
   background-color: #138496;
 }
-.logcat-status-message { /* 用于显示清除和下载状态 */
+.logcat-status-message {
   margin-top: 10px;
   text-align: center;
 }
