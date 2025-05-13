@@ -39,3 +39,22 @@ func DeviceGoHomeHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Home command sent successfully to device " + deviceId})
 }
+
+// DeviceWakeUpHandler 处理唤醒设备屏幕的请求
+func DeviceWakeUpHandler(c *gin.Context) {
+	deviceId := c.Param("deviceId")
+	if deviceId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Device ID is required"})
+		return
+	}
+
+	log.Printf("DeviceWakeUpHandler: Received request for device %s to wake up", deviceId)
+	err := adb.WakeUpDevice(deviceId)
+	if err != nil {
+		log.Printf("DeviceWakeUpHandler: Error for device %s: %v", deviceId, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send wake up command", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Wake up command sent successfully to device " + deviceId})
+}

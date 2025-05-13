@@ -424,3 +424,27 @@ func ForceStopPackage(deviceId string, packageName string) (string, error) {
 
 	return output, nil
 }
+
+func WakeUpDevice(deviceId string) error {
+	if deviceId == "" {
+		return fmt.Errorf("WakeUpDevice: deviceId cannot be empty")
+	}
+
+	log.Printf("WakeUpDevice: Attempting to send WAKEUP keyevent to device '%s'", deviceId)
+	// adb -s <deviceId> shell input keyevent KEYCODE_WAKEUP
+	// KEYCODE_POWER (26) 也可以，但 WAKEUP (224) 更直接
+	cmd := exec.Command("adb", "-s", deviceId, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		errMsg := fmt.Sprintf("WakeUpDevice: Failed for device '%s': %v. Stderr: %s",
+			deviceId, err, stderr.String())
+		log.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	log.Printf("WakeUpDevice: Successfully sent WAKEUP keyevent to device '%s'", deviceId)
+	return nil
+}

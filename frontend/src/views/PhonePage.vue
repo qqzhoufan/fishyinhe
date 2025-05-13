@@ -13,9 +13,9 @@ const isMirroring = ref(false);
 const screenCanvasRef = ref(null);
 let socket = null;
 let canvasCtx = null;
-const isDraggingOnCanvas = ref(false); // 新增：标记是否正在canvas上拖拽
-const dragStartX = ref(0); // 新增：拖拽起始X坐标
-const dragStartY = ref(0); // 新增：拖拽起始Y坐标
+const isDraggingOnCanvas = ref(false);
+const dragStartX = ref(0);
+const dragStartY = ref(0);
 
 // --- 文件浏览相关状态 ---
 const currentRemotePath = ref('/sdcard/');
@@ -49,6 +49,8 @@ const appsListError = ref('');
 const appFilterOption = ref('');
 const uninstallingPackage = ref(null);
 const uninstallStatusMessage = ref('');
+const stoppingPackage = ref(null);
+const stopAppStatusMessage = ref('');
 
 // --- 远程文本输入状态 ---
 const remoteInputText = ref('');
@@ -61,6 +63,10 @@ const clearLogcatMessage = ref('');
 const isDownloadingLogcat = ref(false);
 const downloadLogcatMessage = ref('');
 
+// --- 唤醒屏幕功能的状态 ---
+const isWakingUpDevice = ref(false);
+const wakeUpMessage = ref('');
+
 
 // --- 获取设备列表 ---
 async function fetchDevices() {
@@ -70,14 +76,17 @@ async function fetchDevices() {
   if (isMirroring.value) stopScreenMirroring();
   selectedDeviceId.value = null;
 
+  // 清空所有子功能状态
   fileList.value = []; currentRemotePath.value = '/sdcard/'; fileListError.value = '';
   uploadError.value = ''; uploadSuccessMessage.value = ''; selectedFileToUpload.value = null;
   selectedApkToInstall.value = null; apkInstallMessage.value = ''; apkInstallError.value = '';
   goHomeMessage.value = '';
   installedApps.value = []; isLoadingApps.value = false; appsListError.value = ''; uninstallStatusMessage.value = '';
+  stoppingPackage.value = null; stopAppStatusMessage.value = '';
   remoteInputText.value = ''; remoteInputStatus.value = '';
   isClearingLogcat.value = false; clearLogcatMessage.value = '';
   isDownloadingLogcat.value = false; downloadLogcatMessage.value = '';
+  isWakingUpDevice.value = false; wakeUpMessage.value = '';
 
   try {
     const response = await axios.get('http://localhost:5679/api/devices');
@@ -95,14 +104,17 @@ function selectDevice(deviceId) {
   if (isMirroring.value) stopScreenMirroring();
   selectedDeviceId.value = deviceId;
 
+  // 重置所有子功能状态
   fileList.value = []; currentRemotePath.value = '/sdcard/'; fileListError.value = '';
   uploadError.value = ''; uploadSuccessMessage.value = ''; selectedFileToUpload.value = null;
   selectedApkToInstall.value = null; apkInstallMessage.value = ''; apkInstallError.value = '';
   goHomeMessage.value = '';
   installedApps.value = []; isLoadingApps.value = false; appsListError.value = ''; uninstallStatusMessage.value = '';
+  stoppingPackage.value = null; stopAppStatusMessage.value = '';
   remoteInputText.value = ''; remoteInputStatus.value = '';
   isClearingLogcat.value = false; clearLogcatMessage.value = '';
   isDownloadingLogcat.value = false; downloadLogcatMessage.value = '';
+  isWakingUpDevice.value = false; wakeUpMessage.value = '';
 
   if (deviceId) fetchFileList();
 }
@@ -121,62 +133,46 @@ function getCanvasCoordinates(event, canvasElement) {
 // --- 处理 Canvas 点击/触摸事件 ---
 function handleCanvasPointerDown(event) {
   if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN || !screenCanvasRef.value) return;
-  event.preventDefault(); // 防止默认行为，如拖拽图片
+  event.preventDefault();
 
   const { x, y } = getCanvasCoordinates(event.touches ? event.touches[0] : event, screenCanvasRef.value);
   isDraggingOnCanvas.value = true;
   dragStartX.value = x;
   dragStartY.value = y;
-  console.log(`[CanvasPointerDown] Start: x=${dragStartX.value}, y=${dragStartY.value}`);
 }
 
 function handleCanvasPointerUp(event) {
   if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN || !screenCanvasRef.value || !isDraggingOnCanvas.value) {
-    isDraggingOnCanvas.value = false; // 确保重置
+    isDraggingOnCanvas.value = false;
     return;
   }
   event.preventDefault();
 
   const { x: endX, y: endY } = getCanvasCoordinates(event.changedTouches ? event.changedTouches[0] : event, screenCanvasRef.value);
   isDraggingOnCanvas.value = false;
-  console.log(`[CanvasPointerUp] End: x=${endX}, y=${endY}`);
 
   const deltaX = endX - dragStartX.value;
   const deltaY = endY - dragStartY.value;
   const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-  const swipeThreshold = 10; // 像素阈值，小于此值认为是点击
-  const tapDurationThreshold = 200; // ms, 按下和抬起之间的时间，用于区分点击和长按/滑动
+  const swipeThreshold = 10;
 
-  // 简单实现：如果位移很小，则认为是点击；否则认为是滑动
-  // 注意：event.timeStamp 可能需要更复杂的逻辑来判断按下时长
-
-  if (distance < swipeThreshold) { // 认为是点击
+  if (distance < swipeThreshold) {
     if (dragStartX.value >= 0 && dragStartX.value <= screenCanvasRef.value.width &&
         dragStartY.value >= 0 && dragStartY.value <= screenCanvasRef.value.height) {
       const clickData = { type: "input_tap", x: dragStartX.value, y: dragStartY.value };
       socket.send(JSON.stringify(clickData));
-      console.log('[handleCanvasPointerUp] Sent tap event to backend:', clickData);
     }
-  } else { // 认为是滑动
+  } else {
     if (dragStartX.value >= 0 && dragStartX.value <= screenCanvasRef.value.width &&
         dragStartY.value >= 0 && dragStartY.value <= screenCanvasRef.value.height &&
         endX >=0 && endX <= screenCanvasRef.value.width &&
         endY >=0 && endY <= screenCanvasRef.value.height
     ) {
-      const swipeData = {
-        type: "input_swipe",
-        x1: dragStartX.value,
-        y1: dragStartY.value,
-        x2: endX,
-        y2: endY,
-        duration: 300, // ms, 可以调整或让用户设置
-      };
+      const swipeData = { type: "input_swipe", x1: dragStartX.value, y1: dragStartY.value, x2: endX, y2: endY, duration: 300 };
       socket.send(JSON.stringify(swipeData));
-      console.log('[handleCanvasPointerUp] Sent swipe event to backend:', swipeData);
     }
   }
-  dragStartX.value = 0;
-  dragStartY.value = 0;
+  dragStartX.value = 0; dragStartY.value = 0;
 }
 
 // --- 屏幕镜像方法 ---
@@ -191,14 +187,10 @@ function startScreenMirroring() {
   remoteInputStatus.value = '';
 
   socket.onopen = () => {
-    console.log("[startScreenMirroring] WebSocket connection established.");
     if (screenCanvasRef.value) {
       canvasCtx = screenCanvasRef.value.getContext('2d');
-      // 添加 pointer 事件监听器 (同时处理鼠标和触摸)
       screenCanvasRef.value.addEventListener('pointerdown', handleCanvasPointerDown);
       screenCanvasRef.value.addEventListener('pointerup', handleCanvasPointerUp);
-      // screenCanvasRef.value.addEventListener('pointermove', handleCanvasPointerMove); // 如果需要拖拽过程
-      console.log("[startScreenMirroring] Pointer listeners added to canvas.");
     }
   };
   socket.onmessage = async (event) => {
@@ -216,8 +208,8 @@ function startScreenMirroring() {
       try {
         const msgData = JSON.parse(event.data);
         if (msgData.type === 'error') remoteInputStatus.value = `屏幕镜像错误: ${msgData.message || '未知错误'}`;
-        else if (msgData.type === 'input_text_ack') remoteInputStatus.value = `文本已发送到设备: "${msgData.text}"`;
-        else if (msgData.type === 'input_keyevent_ack') remoteInputStatus.value = `按键 ${msgData.keycode} 已发送到设备。`;
+        else if (msgData.type === 'input_text_ack') remoteInputStatus.value = `文本已发送: "${msgData.text}"`;
+        else if (msgData.type === 'input_keyevent_ack') remoteInputStatus.value = `按键 ${msgData.keycode} 已发送。`;
         else if (msgData.type === 'input_swipe_ack') remoteInputStatus.value = `滑动操作已发送。`;
         else if (msgData.type === 'input_tap_ack') remoteInputStatus.value = `点击操作已发送。`;
       } catch (e) { remoteInputStatus.value = `收到未知文本消息: ${event.data}`; }
@@ -229,8 +221,6 @@ function startScreenMirroring() {
     if (screenCanvasRef.value) {
       screenCanvasRef.value.removeEventListener('pointerdown', handleCanvasPointerDown);
       screenCanvasRef.value.removeEventListener('pointerup', handleCanvasPointerUp);
-      // screenCanvasRef.value.removeEventListener('pointermove', handleCanvasPointerMove);
-      console.log("[startScreenMirroring] Pointer listeners removed from canvas.");
       if (canvasCtx) canvasCtx.clearRect(0, 0, screenCanvasRef.value.width, screenCanvasRef.value.height);
     }
     canvasCtx = null; socket = null;
@@ -238,12 +228,7 @@ function startScreenMirroring() {
     if (!errorMessage.value) remoteInputStatus.value = '屏幕镜像已断开。';
   };
 }
-function stopScreenMirroring() {
-  console.log('[stopScreenMirroring] Attempting to stop mirroring.');
-  if (socket) {
-    socket.close(1000, "User requested stop");
-  }
-}
+function stopScreenMirroring() { if (socket) socket.close(1000, "User stop"); }
 
 // --- 文件浏览方法 ---
 async function fetchFileList() {
@@ -252,7 +237,8 @@ async function fetchFileList() {
   fileListError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
   apkInstallMessage.value = ''; apkInstallError.value = ''; goHomeMessage.value = '';
   appsListError.value = ''; uninstallStatusMessage.value = ''; remoteInputStatus.value = '';
-  clearLogcatMessage.value = ''; downloadLogcatMessage.value = '';
+  clearLogcatMessage.value = ''; downloadLogcatMessage.value = ''; stopAppStatusMessage.value = '';
+  wakeUpMessage.value = '';
 
   try {
     const response = await axios.get(`http://localhost:5679/api/files/list/${selectedDeviceId.value}`, {
@@ -379,7 +365,7 @@ async function installSelectedApk() {
   }
   isInstallingApk.value = true; apkInstallMessage.value = `安装 ${selectedApkToInstall.value.name}...`; apkInstallError.value = '';
   uploadSuccessMessage.value = ''; uploadError.value = ''; fileListError.value = ''; goHomeMessage.value = ''; remoteInputStatus.value = '';
-  clearLogcatMessage.value = ''; downloadLogcatMessage.value = '';
+  clearLogcatMessage.value = ''; downloadLogcatMessage.value = ''; stopAppStatusMessage.value = ''; wakeUpMessage.value = '';
 
   const formData = new FormData();
   formData.append('apkFile', selectedApkToInstall.value);
@@ -411,7 +397,7 @@ async function sendGoHomeCommand() {
   if (!selectedDeviceId.value) { alert("请选择设备！"); return; }
   isSendingGoHome.value = true; goHomeMessage.value = '发送返回主页命令...';
   apkInstallMessage.value = ''; apkInstallError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = ''; fileListError.value = ''; remoteInputStatus.value = '';
-  clearLogcatMessage.value = ''; downloadLogcatMessage.value = '';
+  clearLogcatMessage.value = ''; downloadLogcatMessage.value = ''; stopAppStatusMessage.value = ''; wakeUpMessage.value = '';
   try {
     const response = await axios.post(`http://localhost:5679/api/devices/${selectedDeviceId.value}/gohome`);
     goHomeMessage.value = response.data.message || "返回主页命令已发送。";
@@ -423,11 +409,41 @@ async function sendGoHomeCommand() {
   }
 }
 
+// --- 发送唤醒屏幕命令的方法 ---
+async function sendWakeUpCommand() {
+  if (!selectedDeviceId.value) {
+    alert("请先选择一个设备！");
+    return;
+  }
+  isWakingUpDevice.value = true;
+  wakeUpMessage.value = '正在发送唤醒命令...';
+  apkInstallMessage.value = ''; apkInstallError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
+  fileListError.value = ''; goHomeMessage.value = ''; remoteInputStatus.value = ''; appsListError.value = ''; uninstallStatusMessage.value = '';
+  clearLogcatMessage.value = ''; downloadLogcatMessage.value = ''; stopAppStatusMessage.value = '';
+
+  try {
+    const response = await axios.post(`http://localhost:5679/api/devices/${selectedDeviceId.value}/wakeup`);
+    wakeUpMessage.value = response.data.message || "唤醒命令已发送。";
+    console.log("Wake up command response:", response.data);
+    setTimeout(() => { wakeUpMessage.value = ''; }, 3000);
+  } catch (error) {
+    console.error("Error sending wake up command:", error);
+    if (error.response && error.response.data && error.response.data.error) {
+      wakeUpMessage.value = `错误: ${error.response.data.error} - ${error.response.data.details || ''}`;
+    } else {
+      wakeUpMessage.value = "发送唤醒命令失败。";
+    }
+  } finally {
+    isWakingUpDevice.value = false;
+  }
+}
+
+
 // --- 应用管理方法 ---
 async function fetchInstalledApps() {
   if (!selectedDeviceId.value) { appsListError.value = "请先选择一个设备。"; return; }
   isLoadingApps.value = true;
-  appsListError.value = ''; uninstallStatusMessage.value = '';
+  appsListError.value = ''; uninstallStatusMessage.value = ''; stopAppStatusMessage.value = '';
   installedApps.value = [];
   let params = {};
   if (appFilterOption.value && appFilterOption.value !== 'all') params.filter = appFilterOption.value;
@@ -450,6 +466,7 @@ async function confirmAndUninstallApp(packageName) {
     uninstallStatusMessage.value = "卸载已取消。"; setTimeout(() => uninstallStatusMessage.value = '', 3000); return;
   }
   uninstallingPackage.value = packageName; uninstallStatusMessage.value = `卸载 ${packageName}...`;
+  stopAppStatusMessage.value = '';
   try {
     const response = await axios.post(
         `http://localhost:5679/api/apps/uninstall/${selectedDeviceId.value}`,
@@ -465,22 +482,54 @@ async function confirmAndUninstallApp(packageName) {
     uninstallingPackage.value = null;
   }
 }
+async function confirmAndForceStopApp(packageName) {
+  if (!selectedDeviceId.value || !packageName) {
+    stopAppStatusMessage.value = !selectedDeviceId.value ? "错误：未选择设备。" : "错误：未提供包名。";
+    return;
+  }
+  const confirmStop = confirm(`确定要强制停止应用 "${packageName}" 吗？`);
+  if (!confirmStop) {
+    stopAppStatusMessage.value = "停止操作已取消。";
+    setTimeout(() => stopAppStatusMessage.value = '', 3000);
+    return;
+  }
+  stoppingPackage.value = packageName;
+  stopAppStatusMessage.value = `正在停止 ${packageName}...`;
+  uninstallStatusMessage.value = '';
+  try {
+    const response = await axios.post(
+        `http://localhost:5679/api/apps/stop/${selectedDeviceId.value}`,
+        { packageName: packageName }
+    );
+    stopAppStatusMessage.value = `停止应用 "${packageName}" 命令已执行。\nADB 输出:\n${response.data.details || '通常无输出代表成功。'}`;
+    if (response.data.details && (response.data.details.toLowerCase().includes("error") || response.data.details.toLowerCase().includes("failed"))) {
+      stopAppStatusMessage.value += "\n(操作可能未成功，请检查ADB输出)";
+    } else {
+      stopAppStatusMessage.value += "\n(操作已发送)";
+    }
+  } catch (error) {
+    stopAppStatusMessage.value = `停止应用 "${packageName}" 失败: ${error.response?.data?.error || error.message}\n详情: ${error.response?.data?.details || ''}`;
+  } finally {
+    stoppingPackage.value = null;
+  }
+}
+
 
 // --- 远程文本输入方法 ---
 function sendRemoteText() {
   if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN) {
-    remoteInputStatus.value = "错误：屏幕镜像未连接，无法发送文本。"; return;
+    remoteInputStatus.value = "错误：屏幕镜像未连接。"; return;
   }
   if (remoteInputText.value.trim() === '') {
-    remoteInputStatus.value = "请输入要发送的文本。"; return;
+    remoteInputStatus.value = "请输入文本。"; return;
   }
   isSendingText.value = true;
   remoteInputStatus.value = `发送文本: "${remoteInputText.value}"...`;
   const textData = { type: "input_text", text: remoteInputText.value };
   socket.send(JSON.stringify(textData));
   isSendingText.value = false;
-  setTimeout(() => { if(remoteInputStatus.value.startsWith('发送文本')) remoteInputStatus.value = '文本已发送 (等待设备响应)'; }, 500);
-  setTimeout(() => { if(remoteInputStatus.value === '文本已发送 (等待设备响应)') remoteInputStatus.value = ''; }, 2000);
+  setTimeout(() => { if(remoteInputStatus.value.startsWith('发送文本')) remoteInputStatus.value = '文本已发送'; }, 500);
+  setTimeout(() => { if(remoteInputStatus.value === '文本已发送') remoteInputStatus.value = ''; }, 2000);
 }
 function sendRemoteEnterKey() {
   if (!isMirroring.value || !socket || socket.readyState !== WebSocket.OPEN) {
@@ -498,13 +547,13 @@ function sendRemoteEnterKey() {
 // --- Logcat 管理方法 ---
 async function clearDeviceLogcat() {
   if (!selectedDeviceId.value) {
-    clearLogcatMessage.value = "错误：请先选择一个设备。"; return;
+    clearLogcatMessage.value = "错误：请选择设备。"; return;
   }
   isClearingLogcat.value = true;
-  clearLogcatMessage.value = "正在清除 Logcat 缓存...";
+  clearLogcatMessage.value = "清除 Logcat 缓存...";
   apkInstallMessage.value = ''; apkInstallError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
   fileListError.value = ''; goHomeMessage.value = ''; remoteInputStatus.value = ''; appsListError.value = ''; uninstallStatusMessage.value = '';
-  downloadLogcatMessage.value = '';
+  downloadLogcatMessage.value = ''; stopAppStatusMessage.value = ''; wakeUpMessage.value = '';
   try {
     const response = await axios.post(`http://localhost:5679/api/logcat/clear/${selectedDeviceId.value}`);
     clearLogcatMessage.value = response.data.message || "Logcat 缓存已清除。";
@@ -517,13 +566,13 @@ async function clearDeviceLogcat() {
 }
 async function downloadDeviceLogcat() {
   if (!selectedDeviceId.value) {
-    downloadLogcatMessage.value = "错误：请先选择一个设备。"; return;
+    downloadLogcatMessage.value = "错误：请选择设备。"; return;
   }
   isDownloadingLogcat.value = true;
-  downloadLogcatMessage.value = "正在准备下载 Logcat 文件...";
+  downloadLogcatMessage.value = "准备下载 Logcat 文件...";
   apkInstallMessage.value = ''; apkInstallError.value = ''; uploadSuccessMessage.value = ''; uploadError.value = '';
   fileListError.value = ''; goHomeMessage.value = ''; remoteInputStatus.value = ''; appsListError.value = ''; uninstallStatusMessage.value = '';
-  clearLogcatMessage.value = '';
+  clearLogcatMessage.value = ''; stopAppStatusMessage.value = ''; wakeUpMessage.value = '';
   const downloadUrl = `http://localhost:5679/api/logcat/download/${selectedDeviceId.value}`;
   try {
     const response = await axios({ url: downloadUrl, method: 'GET', responseType: 'blob' });
@@ -539,7 +588,7 @@ async function downloadDeviceLogcat() {
     link.href = href; link.setAttribute('download', filename);
     document.body.appendChild(link); link.click();
     document.body.removeChild(link); URL.revokeObjectURL(href);
-    downloadLogcatMessage.value = `Logcat 文件 "${filename}" 下载已开始。`;
+    downloadLogcatMessage.value = `Logcat 文件 "${filename}" 下载开始。`;
   } catch (error) {
     let errorMsg = "下载 Logcat 文件失败: ";
     if (error.response) {
@@ -554,7 +603,7 @@ async function downloadDeviceLogcat() {
       } else {
         errorMsg += `${error.response.status} - ${error.response.statusText || '服务器错误'}`;
       }
-    } else if (error.request) { errorMsg += "网络错误或无法连接到服务器。"; }
+    } else if (error.request) { errorMsg += "网络错误。"; }
     else { errorMsg += error.message; }
     downloadLogcatMessage.value = errorMsg;
   } finally {
@@ -575,6 +624,7 @@ watch(selectedDeviceId, (newId, oldId) => {
     installedApps.value = []; appsListError.value = ''; uninstallStatusMessage.value = '';
     remoteInputText.value = ''; remoteInputStatus.value = '';
     clearLogcatMessage.value = ''; downloadLogcatMessage.value = '';
+    stopAppStatusMessage.value = ''; wakeUpMessage.value = '';
   }
 });
 </script>
@@ -597,10 +647,12 @@ watch(selectedDeviceId, (newId, oldId) => {
     <p style="margin:2px 0; color: green;">InstallOK: {{ apkInstallMessage || 'N' }}</p>
     <p style="margin:2px 0; color: sienna;">InstallErr: {{ apkInstallError || 'N' }}</p>
     <p style="margin:2px 0; color: blue;">GoHomeMsg: {{ goHomeMessage || 'N' }}</p>
+    <p style="margin:2px 0; color: darkgoldenrod;">WakeUpMsg: {{ wakeUpMessage || 'N' }}</p>
     <p style="margin:2px 0;">LoadingApps: {{ isLoadingApps }}</p>
     <p style="margin:2px 0;">AppsCount: {{ installedApps.length }}</p>
     <p style="margin:2px 0; color: sienna;">AppsErr: {{ appsListError || 'N' }}</p>
     <p style="margin:2px 0; color: darkmagenta;">UninstallMsg: {{ uninstallStatusMessage || 'N' }}</p>
+    <p style="margin:2px 0; color: orangered;">StopAppMsg: {{ stopAppStatusMessage || 'N' }}</p>
     <p style="margin:2px 0; color: teal;">RemoteInputStatus: {{ remoteInputStatus || 'N' }}</p>
     <p style="margin:2px 0; color: indigo;">ClearLogcat: {{ clearLogcatMessage || 'N' }}</p>
     <p style="margin:2px 0; color: indigo;">DownloadLogcat: {{ downloadLogcatMessage || 'N' }}</p>
@@ -609,7 +661,7 @@ watch(selectedDeviceId, (newId, oldId) => {
   <div class="phone-page">
     <header>
       <h1>手机连接与管理</h1>
-      <button @click="fetchDevices" :disabled="isLoading || isMirroring || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat" class="refresh-btn">
+      <button @click="fetchDevices" :disabled="isLoading || isMirroring || isUploadingFile || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat" class="refresh-btn">
         {{ isLoading ? '刷新中...' : '刷新设备列表' }}
       </button>
     </header>
@@ -639,7 +691,7 @@ watch(selectedDeviceId, (newId, oldId) => {
       <section class="action-section screen-mirror-section">
         <h4>屏幕镜像</h4>
         <div class="mirror-controls">
-          <button @click="startScreenMirroring" :disabled="isMirroring || !selectedDeviceId || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat" class="control-btn start-btn">开始屏幕镜像</button>
+          <button @click="startScreenMirroring" :disabled="isMirroring || !selectedDeviceId || isUploadingFile || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat" class="control-btn start-btn">开始屏幕镜像</button>
           <button @click="stopScreenMirroring" :disabled="!isMirroring" class="control-btn stop-btn">停止屏幕镜像</button>
         </div>
         <div v-if="isMirroring" class="remote-input-area">
@@ -654,12 +706,12 @@ watch(selectedDeviceId, (newId, oldId) => {
           <button @click="sendRemoteEnterKey" class="control-btn send-enter-btn" :disabled="isSendingText || !isMirroring">发送回车</button>
         </div>
         <p v-if="remoteInputStatus" class="status-message remote-input-feedback" :class="{'error': remoteInputStatus.toLowerCase().includes('错误')}">{{ remoteInputStatus }}</p>
-        <div v-if="isMirroring && errorMessage && !fileListError && !uploadError && !apkInstallError && !goHomeMessage && !appsListError && !uninstallStatusMessage && !remoteInputStatus && !clearLogcatMessage && !downloadLogcatMessage" class="error-section mirror-error">
+        <div v-if="isMirroring && errorMessage && !fileListError && !uploadError && !apkInstallError && !goHomeMessage && !wakeUpMessage && !appsListError && !uninstallStatusMessage && !remoteInputStatus && !clearLogcatMessage && !downloadLogcatMessage && !stopAppStatusMessage" class="error-section mirror-error">
           <p class="error-message">{{ errorMessage }}</p>
         </div>
         <div v-if="isMirroring" class="mirror-display-area">
-          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击或拖拽此处可在手机上模拟操作"></canvas> <p v-if="!canvasCtx && isMirroring">...</p>
-        </div>
+          <canvas ref="screenCanvasRef" class="mirrored-screen-canvas" title="点击或拖拽此处可在手机上模拟操作"></canvas>
+          <p v-if="!canvasCtx && isMirroring">...</p> </div>
       </section>
 
       <hr class="section-divider">
@@ -669,53 +721,23 @@ watch(selectedDeviceId, (newId, oldId) => {
         <button
             @click="sendGoHomeCommand"
             class="control-btn go-home-btn"
-            :disabled="isSendingGoHome || !selectedDeviceId || isUploadingFile || isInstallingApk || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+            :disabled="isSendingGoHome || !selectedDeviceId || isUploadingFile || isInstallingApk || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
         >
           {{ isSendingGoHome ? '处理中...' : '返回手机主页' }}
+        </button>
+        <button
+            @click="sendWakeUpCommand"
+            class="control-btn wakeup-btn"
+            :disabled="isWakingUpDevice || !selectedDeviceId || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+        >
+          {{ isWakingUpDevice ? '唤醒中...' : '唤醒屏幕' }}
         </button>
         <p v-if="goHomeMessage" class="status-message" :class="{'error': goHomeMessage.toLowerCase().includes('错误') || goHomeMessage.toLowerCase().includes('失败')}">
           {{ goHomeMessage }}
         </p>
-      </section>
-
-      <section class="action-section app-management-section">
-        <h4>应用管理</h4>
-        <div class="app-list-controls">
-          <label for="appFilter">过滤应用: </label>
-          <select id="appFilter" v-model="appFilterOption" @change="fetchInstalledApps" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
-            <option value="">所有应用</option>
-            <option value="third_party">仅第三方应用</option>
-          </select>
-          <button @click="fetchInstalledApps" class="control-btn" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
-            {{ isLoadingApps ? '加载中...' : '加载应用列表' }}
-          </button>
-        </div>
-
-        <div v-if="isLoadingApps" class="loading-section"><p>正在加载应用列表...</p></div>
-        <div v-if="appsListError && !isLoadingApps" class="error-section"><p class="error-message">{{ appsListError }}</p></div>
-
-        <div v-if="uninstallStatusMessage" class="status-message uninstall-feedback" :class="{'error': uninstallStatusMessage.toLowerCase().includes('失败') || uninstallStatusMessage.toLowerCase().includes('错误')}">
-          <pre>{{ uninstallStatusMessage }}</pre>
-        </div>
-
-        <div v-if="!isLoadingApps && !appsListError && installedApps.length > 0" class="installed-apps-container">
-          <h5>已安装应用包名 ({{ installedApps.length }}):</h5>
-          <ul>
-            <li v-for="pkg in installedApps" :key="pkg" class="app-item">
-              <span class="app-package-name">{{ pkg }}</span>
-              <button
-                  @click="confirmAndUninstallApp(pkg)"
-                  class="control-btn uninstall-app-btn"
-                  :disabled="uninstallingPackage === pkg || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"
-              >
-                {{ uninstallingPackage === pkg ? '卸载中...' : '卸载' }}
-              </button>
-            </li>
-          </ul>
-        </div>
-        <div v-if="!isLoadingApps && !appsListError && installedApps.length === 0 && selectedDeviceId" class="no-apps-section">
-          <p>未找到已安装的应用 (或符合当前过滤条件的应用)。</p>
-        </div>
+        <p v-if="wakeUpMessage" class="status-message" :class="{'error': wakeUpMessage.toLowerCase().includes('错误') || wakeUpMessage.toLowerCase().includes('失败')}">
+          {{ wakeUpMessage }}
+        </p>
       </section>
 
       <hr class="section-divider">
@@ -723,11 +745,11 @@ watch(selectedDeviceId, (newId, oldId) => {
       <section class="action-section file-browser-section">
         <h4>文件浏览器 & 文件上传</h4>
         <div class="path-navigation">
-          <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径" :disabled="isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat || !selectedDeviceId" />
-          <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat || !selectedDeviceId" class="control-btn">
+          <input type="text" v-model="currentRemotePath" @keyup.enter="fetchFileList" placeholder="输入设备路径" :disabled="isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat || !selectedDeviceId" />
+          <button @click="fetchFileList" :disabled="isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat || !selectedDeviceId" class="control-btn">
             {{ isFileListing ? '加载中...' : '转到路径' }}
           </button>
-          <button @click="navigateUp" :disabled="!canNavigateUp || isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat || !selectedDeviceId" class="control-btn up-btn">
+          <button @click="navigateUp" :disabled="!canNavigateUp || isFileListing || isUploadingFile || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat || !selectedDeviceId" class="control-btn up-btn">
             返回上一级
           </button>
         </div>
@@ -738,9 +760,9 @@ watch(selectedDeviceId, (newId, oldId) => {
               @change="handleFileSelect"
               ref="fileInputRef"
               style="display: none;"
-              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
           />
-          <button @click="triggerFileInput" class="control-btn choose-file-btn" :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
+          <button @click="triggerFileInput" class="control-btn choose-file-btn" :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
             选择文件上传
           </button>
           <span v-if="selectedFileToUpload" class="selected-file-name">
@@ -750,7 +772,7 @@ watch(selectedDeviceId, (newId, oldId) => {
               v-if="selectedFileToUpload"
               @click="uploadSelectedFile"
               class="control-btn upload-btn"
-              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+              :disabled="isUploadingFile || !selectedDeviceId || isInstallingApk || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
           >
             {{ isUploadingFile ? `上传中... ${uploadProgress}%` : '上传到当前目录' }}
           </button>
@@ -800,9 +822,9 @@ watch(selectedDeviceId, (newId, oldId) => {
               ref="apkFileInputRef"
               style="display: none;"
               accept=".apk"
-              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
           />
-          <button @click="triggerApkFileInput" class="control-btn choose-file-btn" :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
+          <button @click="triggerApkFileInput" class="control-btn choose-file-btn" :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
             选择本地 APK 文件
           </button>
           <span v-if="selectedApkToInstall" class="selected-file-name">
@@ -812,7 +834,7 @@ watch(selectedDeviceId, (newId, oldId) => {
               v-if="selectedApkToInstall"
               @click="installSelectedApk"
               class="control-btn install-apk-btn"
-              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
+              :disabled="isInstallingApk || !selectedDeviceId || isUploadingFile || isSendingGoHome || isWakingUpDevice || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat"
           >
             {{ isInstallingApk ? '正在安装...' : '安装选中的 APK' }}
           </button>
@@ -827,45 +849,58 @@ watch(selectedDeviceId, (newId, oldId) => {
 
       <hr class="section-divider">
 
-<!--      <section class="action-section app-management-section">-->
-<!--        <h4>应用管理</h4>-->
-<!--        <div class="app-list-controls">-->
-<!--          <label for="appFilter">过滤应用: </label>-->
-<!--          <select id="appFilter" v-model="appFilterOption" @change="fetchInstalledApps" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">-->
-<!--            <option value="">所有应用</option>-->
-<!--            <option value="third_party">仅第三方应用</option>-->
-<!--          </select>-->
-<!--          <button @click="fetchInstalledApps" class="control-btn" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">-->
-<!--            {{ isLoadingApps ? '加载中...' : '加载应用列表' }}-->
-<!--          </button>-->
-<!--        </div>-->
+      <section class="action-section app-management-section">
+        <h4>应用管理</h4>
+        <div class="app-list-controls">
+          <label for="appFilter">过滤应用: </label>
+          <select id="appFilter" v-model="appFilterOption" @change="fetchInstalledApps" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
+            <option value="">所有应用</option>
+            <option value="third_party">仅第三方应用</option>
+          </select>
+          <button @click="fetchInstalledApps" class="control-btn" :disabled="isLoadingApps || !selectedDeviceId || uninstallingPackage || stoppingPackage || isSendingText || isClearingLogcat || isDownloadingLogcat">
+            {{ isLoadingApps ? '加载中...' : '加载应用列表' }}
+          </button>
+        </div>
 
-<!--        <div v-if="isLoadingApps" class="loading-section"><p>正在加载应用列表...</p></div>-->
-<!--        <div v-if="appsListError && !isLoadingApps" class="error-section"><p class="error-message">{{ appsListError }}</p></div>-->
+        <div v-if="isLoadingApps" class="loading-section"><p>正在加载应用列表...</p></div>
+        <div v-if="appsListError && !isLoadingApps" class="error-section"><p class="error-message">{{ appsListError }}</p></div>
 
-<!--        <div v-if="uninstallStatusMessage" class="status-message uninstall-feedback" :class="{'error': uninstallStatusMessage.toLowerCase().includes('失败') || uninstallStatusMessage.toLowerCase().includes('错误')}">-->
-<!--          <pre>{{ uninstallStatusMessage }}</pre>-->
-<!--        </div>-->
+        <div v-if="uninstallStatusMessage || stopAppStatusMessage"
+             class="status-message operation-feedback"
+             :class="{'error': (uninstallStatusMessage && (uninstallStatusMessage.toLowerCase().includes('失败') || uninstallStatusMessage.toLowerCase().includes('错误'))) || (stopAppStatusMessage && (stopAppStatusMessage.toLowerCase().includes('失败') || stopAppStatusMessage.toLowerCase().includes('错误')))}">
+          <pre v-if="uninstallStatusMessage">{{ uninstallStatusMessage }}</pre>
+          <pre v-if="stopAppStatusMessage">{{ stopAppStatusMessage }}</pre>
+        </div>
 
-<!--        <div v-if="!isLoadingApps && !appsListError && installedApps.length > 0" class="installed-apps-container">-->
-<!--          <h5>已安装应用包名 ({{ installedApps.length }}):</h5>-->
-<!--          <ul>-->
-<!--            <li v-for="pkg in installedApps" :key="pkg" class="app-item">-->
-<!--              <span class="app-package-name">{{ pkg }}</span>-->
-<!--              <button-->
-<!--                  @click="confirmAndUninstallApp(pkg)"-->
-<!--                  class="control-btn uninstall-app-btn"-->
-<!--                  :disabled="uninstallingPackage === pkg || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"-->
-<!--              >-->
-<!--                {{ uninstallingPackage === pkg ? '卸载中...' : '卸载' }}-->
-<!--              </button>-->
-<!--            </li>-->
-<!--          </ul>-->
-<!--        </div>-->
-<!--        <div v-if="!isLoadingApps && !appsListError && installedApps.length === 0 && selectedDeviceId" class="no-apps-section">-->
-<!--          <p>未找到已安装的应用 (或符合当前过滤条件的应用)。</p>-->
-<!--        </div>-->
-<!--      </section>-->
+
+        <div v-if="!isLoadingApps && !appsListError && installedApps.length > 0" class="installed-apps-container">
+          <h5>已安装应用包名 ({{ installedApps.length }}):</h5>
+          <ul>
+            <li v-for="pkg in installedApps" :key="pkg" class="app-item">
+              <span class="app-package-name">{{ pkg }}</span>
+              <div class="app-item-actions">
+                <button
+                    @click="confirmAndForceStopApp(pkg)"
+                    class="control-btn stop-app-btn"
+                    :disabled="stoppingPackage === pkg || uninstallingPackage || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"
+                >
+                  {{ stoppingPackage === pkg ? '停止中...' : '停止' }}
+                </button>
+                <button
+                    @click="confirmAndUninstallApp(pkg)"
+                    class="control-btn uninstall-app-btn"
+                    :disabled="uninstallingPackage === pkg || stoppingPackage || !selectedDeviceId || isSendingText || isClearingLogcat || isDownloadingLogcat"
+                >
+                  {{ uninstallingPackage === pkg ? '卸载中...' : '卸载' }}
+                </button>
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div v-if="!isLoadingApps && !appsListError && installedApps.length === 0 && selectedDeviceId" class="no-apps-section">
+          <p>未找到已安装的应用 (或符合当前过滤条件的应用)。</p>
+        </div>
+      </section>
 
       <hr class="section-divider">
 
@@ -875,14 +910,14 @@ watch(selectedDeviceId, (newId, oldId) => {
           <button
               @click="clearDeviceLogcat"
               class="control-btn clear-logcat-btn"
-              :disabled="isClearingLogcat || !selectedDeviceId || isDownloadingLogcat || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText"
+              :disabled="isClearingLogcat || !selectedDeviceId || isDownloadingLogcat || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText"
           >
             {{ isClearingLogcat ? '清除中...' : '清除 Logcat 缓存' }}
           </button>
           <button
               @click="downloadDeviceLogcat"
               class="control-btn download-logcat-btn"
-              :disabled="isDownloadingLogcat || !selectedDeviceId || isClearingLogcat || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || isSendingText"
+              :disabled="isDownloadingLogcat || !selectedDeviceId || isClearingLogcat || isUploadingFile || isInstallingApk || isSendingGoHome || isLoadingApps || uninstallingPackage || stoppingPackage || isSendingText"
           >
             {{ isDownloadingLogcat ? '准备下载...' : '下载当前 Logcat' }}
           </button>
@@ -921,7 +956,8 @@ watch(selectedDeviceId, (newId, oldId) => {
 .status-message.error,
 .uninstall-feedback.error,
 .remote-input-feedback.error,
-.logcat-status-message.error { /* 统一错误消息样式 */
+.logcat-status-message.error,
+.operation-feedback.error {
   color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb;
   padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
 }
@@ -930,16 +966,17 @@ watch(selectedDeviceId, (newId, oldId) => {
 .status-message:not(.error),
 .uninstall-feedback:not(.error),
 .remote-input-feedback:not(.error),
-.logcat-status-message:not(.error) { /* 统一成功/中性消息样式 */
+.logcat-status-message:not(.error),
+.operation-feedback:not(.error) {
   color: #155724; background-color: #d4edda; border: 1px solid #c3e6cb;
   padding: 12px 15px; border-radius: 5px; text-align: left; margin-top: 12px; word-break: break-word; font-size: 0.95em;
 }
-.status-message:not(.error) { /* goHomeMessage 的中性/成功样式 */
+.status-message:not(.error) {
   color: #004085;
   background-color: #cce5ff;
   border: 1px solid #b8daff;
 }
-.install-status-message pre, .uninstall-feedback pre {
+.install-status-message pre, .uninstall-feedback pre, .operation-feedback pre {
   white-space: pre-wrap;
   word-break: break-all;
   font-family: 'Courier New', Courier, monospace;
@@ -976,8 +1013,11 @@ watch(selectedDeviceId, (newId, oldId) => {
 
 /* 设备控制区域 */
 .device-controls-section { text-align: center; }
+.device-controls-section .control-btn { margin: 5px 8px;} /* 调整设备控制按钮间距 */
 .go-home-btn { background-color: #f0ad4e; color: white; }
 .go-home-btn:not(:disabled):hover { background-color: #ec971f; }
+.wakeup-btn { background-color: #5bc0de; color: white; }
+.wakeup-btn:not(:disabled):hover { background-color: #31b0d5; }
 .status-message { margin-top: 10px; font-size: 0.9em; padding: 8px; border-radius: 4px; }
 
 
@@ -1131,23 +1171,36 @@ watch(selectedDeviceId, (newId, oldId) => {
 .app-item:last-child {
   border-bottom: none;
 }
+.app-item-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .app-package-name {
   color: #212529;
   word-break: break-all;
   margin-right: 10px;
   flex-grow: 1;
 }
+.stop-app-btn {
+  background-color: #ffc107;
+  color: #212529;
+  padding: 6px 10px;
+  font-size: 0.85em;
+}
+.stop-app-btn:not(:disabled):hover {
+  background-color: #e0a800;
+}
 .uninstall-app-btn {
   background-color: #e74c3c;
   color: white;
   padding: 6px 10px;
   font-size: 0.85em;
-  flex-shrink: 0;
 }
 .uninstall-app-btn:not(:disabled):hover {
   background-color: #c0392b;
 }
-.uninstall-feedback {
+.operation-feedback {
   margin-top: 10px;
 }
 .no-apps-section p {
@@ -1161,9 +1214,7 @@ watch(selectedDeviceId, (newId, oldId) => {
 }
 
 /* Logcat 管理部分样式 */
-.logcat-management-section {
-  /* 与其他 action-section 类似 */
-}
+.logcat-management-section {}
 .logcat-controls {
   display: flex;
   gap: 10px;

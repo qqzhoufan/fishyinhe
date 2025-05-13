@@ -21,6 +21,7 @@ func SetupRouter() *gin.Engine { // 函数签名：无参数，返回 *gin.Engin
 		apiV1.GET("/health", handler.HealthCheck)
 		apiV1.GET("/devices", handler.GetDevices)
 		apiV1.POST("/devices/:deviceId/gohome", handler.DeviceGoHomeHandler)
+		apiV1.POST("/devices/:deviceId/wakeup", handler.DeviceWakeUpHandler) // <--- 新增：唤醒屏幕路由
 		apiV1.GET("/screen/:deviceId", handler.ScreenMirrorWS)
 
 		// 文件相关路由组
